@@ -1,0 +1,14 @@
+[[stocks]]
+ticker = "MDG.WA"
+name = "Medicalgorithms"
+keywords = ["fda", "patent", "certyfikat", "algorytm"]
+
+[[stocks]]
+ticker = "MRB.WA"
+name = "Mirbud"
+keywords = ["budowa", "przetarg", "kontrakt", "umowa"]
+
+[[stocks]]
+ticker = "NWG.WA"
+name = "NEWAG"
+keywords = ["kontrakt", "umowa", "przetarg", "produkcja", "lokomotywa", "tramwaj"]
