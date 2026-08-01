@@ -1,3 +1,15 @@
+# Ogólne słowa kluczowe dla wszystkich spółek w portfelu
+global_high_impact = [
+    "wyniki", "przychody", "zysk", "strata", "umowa", "kontrakt",
+    "dywidend", "wezwanie", "emisja", "rezygnacja", "zarząd"
+]
+
+# Globalne słowa kluczowe dla szerokiego rynku / makro
+macro_keywords = [
+    "giełda", "stopy", "inflacja", "nbp", "fed", "orlen", "kghm",
+    "pko", "pekao", "pzu", "dolar", "ropa", "gaz", "msci"
+]
+
 [[stocks]]
 ticker = "MDG.WA"
 name = "Medicalgorithms"
@@ -12,3 +24,18 @@ keywords = ["budowa", "przetarg", "kontrakt", "umowa"]
 ticker = "NWG.WA"
 name = "NEWAG"
 keywords = ["kontrakt", "umowa", "przetarg", "produkcja", "lokomotywa", "tramwaj"]
+
+[[market_sources]]
+name = "ISBnews"
+url = "https://isbnews.pl/feed/"
+is_global = true
+
+[[market_sources]]
+name = "Parkiet ESPI"
+url = "https://www.parkiet.com/rss/espi"
+is_global = false
+
+[[market_sources]]
+name = "PB.pl"
+url = "https://www.pb.pl/rss/wiadomosci.xml"
+is_global = false

@@ -17,8 +17,18 @@ pub struct StockConfig {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+pub struct MarketSourceConfig {
+    pub name: String,
+    pub url: String,
+    pub is_global: bool,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
+    pub global_high_impact: Vec<String>,
+    pub macro_keywords: Vec<String>,
     pub stocks: Vec<StockConfig>,
+    pub market_sources: Vec<MarketSourceConfig>,
 }
 
 #[derive(BotCommands, Clone)]
@@ -122,6 +132,7 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
                                 let mut combined_keywords = stock.keywords.clone();
                                 combined_keywords.push(stock.name.clone());
                                 combined_keywords.push(stock.ticker.replace(".WA", ""));
+                                combined_keywords.extend(config.global_high_impact.clone());
 
                                 if let Some(matched_kw) = matches_keywords(raw_title, &combined_keywords) {
                                     {
@@ -155,6 +166,61 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
             }
         } else {
             error!("Błąd pobierania feedu RSS");
+        }
+
+        for source in &config.market_sources {
+            if let Ok(response) = reqwest::get(&source.url).await {
+                if let Ok(bytes) = response.bytes().await {
+                    if let Ok(feed) = feed_rs::parser::parse(&bytes[..]) {
+                        for entry in feed.entries.iter().take(3) {
+                            let link = entry.links.first().map(|l| l.href.as_str()).unwrap_or("");
+                            let raw_title = entry
+                                .title
+                                .as_ref()
+                                .map(|t| t.content.as_str())
+                                .unwrap_or("");
+
+                            let is_seen = {
+                                let conn = db.lock().unwrap();
+                                is_already_seen(&conn, link)
+                            };
+
+                            if !link.is_empty() && !raw_title.is_empty() && !is_seen {
+                                if let Some(kw) = matches_keywords(raw_title, &config.macro_keywords) {
+                                    {
+                                        let conn = db.lock().unwrap();
+                                        mark_as_seen(&conn, link, raw_title, "MACRO");
+                                    }
+
+                                    info!(
+                                        source = %source.name,
+                                        keyword = %kw,
+                                        title = %raw_title,
+                                        "Dopasowano news makroekonomiczny"
+                                    );
+
+                                    let clean_title = sanitize_html(raw_title);
+                                    let tag = if source.is_global {
+                                        "🌍 <b>[NEWS GLOBALNY]</b>"
+                                    } else {
+                                        "🇵🇱 <b>[RYNEK POLSKI]</b>"
+                                    };
+
+                                    let message = format!(
+                                        "{}\n📰 <b>{}</b>\n\n{}\n\n🔗 <a href=\"{}\">Czytaj artykuł</a>",
+                                        tag, source.name, clean_title, link
+                                    );
+
+                                    let _ = bot
+                                        .send_message(chat_id, message)
+                                        .parse_mode(ParseMode::Html)
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         tokio::time::sleep(Duration::from_secs(3 * 60)).await;
