@@ -190,6 +190,17 @@ fn init_db() -> Connection {
         [],
     )
     .unwrap();
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS price_alerts (
+            ticker TEXT PRIMARY KEY,
+            last_alerted_pct REAL,
+            alerted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+        [],
+    )
+    .unwrap();
+
     conn
 }
 
@@ -230,6 +241,45 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
     let espi_rss_url = "https://www.bankier.pl/rss/wiadomosci.xml";
 
     loop {
+        for stock in &config.stocks {
+            if let Some(price) = get_stock_price(&stock.ticker).await {
+                if price.change_pct.abs() >= 3.0 {
+                    let should_alert = {
+                        let conn = db.lock().unwrap();
+                        let mut stmt = conn
+                            .prepare("SELECT last_alerted_pct FROM price_alerts WHERE ticker = ?1")
+                            .unwrap();
+                        let last_pct: Option<f64> = stmt.query_row([&stock.ticker], |r| r.get(0)).ok();
+
+                        match last_pct {
+                            Some(old) => (price.change_pct - old).abs() >= 2.0,
+                            None => true,
+                        }
+                    };
+
+                    if should_alert {
+                        {
+                            let conn = db.lock().unwrap();
+                            let _ = conn.execute(
+                                "INSERT OR REPLACE INTO price_alerts (ticker, last_alerted_pct) VALUES (?1, ?2)",
+                                [&stock.ticker, &price.change_pct.to_string()],
+                            );
+                        }
+
+                        let trend_icon = if price.change_pct >= 0.0 { "💥 📈" } else { "💥 📉" };
+                        let spike_msg = format!(
+                            "{} <b>[SKOK KURSU]</b>\n🏢 <b>{} ({})</b>\n💵 Kurs: <b>{:.2} {}</b> ({:+.2}%)\n📊 <i>Wykryto silny ruch cenowy! (Źródło: {})</i>",
+                            trend_icon, stock.name, stock.ticker, price.price, price.currency, price.change_pct, price.source
+                        );
+                        let _ = bot
+                            .send_message(chat_id, spike_msg)
+                            .parse_mode(ParseMode::Html)
+                            .await;
+                    }
+                }
+            }
+        }
+
         if let Ok(response) = reqwest::get(espi_rss_url).await {
             if let Ok(bytes) = response.bytes().await {
                 if let Ok(feed) = feed_rs::parser::parse(&bytes[..]) {
