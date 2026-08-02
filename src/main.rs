@@ -37,6 +37,7 @@ pub struct PriceData {
     pub previous_close: f64,
     pub change_pct: f64,
     pub currency: String,
+    pub source: String,
 }
 
 async fn get_price_from_yahoo(ticker: &str) -> Option<PriceData> {
@@ -72,7 +73,81 @@ async fn get_price_from_yahoo(ticker: &str) -> Option<PriceData> {
         previous_close,
         change_pct,
         currency,
+        source: "Yahoo Finance".to_string(),
     })
+}
+
+async fn get_price_from_bankier(ticker: &str) -> Option<PriceData> {
+    let clean_symbol = ticker.replace(".WA", "").to_lowercase();
+    let url = format!(
+        "https://www.bankier.pl/gielda/notowania/akcje/{}",
+        clean_symbol
+    );
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?;
+
+    let html_text = res.text().await.ok()?;
+    let document = scraper::Html::parse_document(&html_text);
+
+    let price_selector = scraper::Selector::parse(".profilHead .profilLast").unwrap();
+    let change_selector = scraper::Selector::parse(".profilHead .change").unwrap();
+
+    let price_str = document
+        .select(&price_selector)
+        .next()?
+        .text()
+        .collect::<String>();
+    let clean_price_str = price_str.trim().replace(",", ".").replace(" ", "");
+    let price: f64 = clean_price_str.parse().ok()?;
+
+    let change_str = document
+        .select(&change_selector)
+        .next()
+        .map(|e| e.text().collect::<String>())
+        .unwrap_or_default();
+
+    let change_pct = if change_str.contains('%') {
+        let clean_pct = change_str
+            .replace("%", "")
+            .replace("(", "")
+            .replace(")", "")
+            .replace("+", "")
+            .replace(",", ".")
+            .trim()
+            .to_string();
+        clean_pct.parse::<f64>().unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
+    let previous_close = if change_pct != -100.0 {
+        price / (1.0 + (change_pct / 100.0))
+    } else {
+        price
+    };
+
+    Some(PriceData {
+        price,
+        previous_close,
+        change_pct,
+        currency: "PLN".to_string(),
+        source: "Bankier.pl".to_string(),
+    })
+}
+
+async fn get_stock_price(ticker: &str) -> Option<PriceData> {
+    if let Some(data) = get_price_from_yahoo(ticker).await {
+        return Some(data);
+    }
+    tracing::warn!(ticker = %ticker, "Yahoo Finance nie odpowiedziało. Przełączanie na fallback Bankier.pl");
+    get_price_from_bankier(ticker).await
 }
 
 #[derive(BotCommands, Clone)]
@@ -191,10 +266,10 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
                                         "Dopasowano komunikat ESPI dla spółki z portfela"
                                     );
 
-                                    let price_header = match get_price_from_yahoo(&stock.ticker).await {
+                                    let price_header = match get_stock_price(&stock.ticker).await {
                                         Some(data) => format!(
-                                            "<b>Kurs:</b> {:.2} {} ({:+.2}%)",
-                                            data.price, data.currency, data.change_pct
+                                            "<b>Kurs:</b> {:.2} {} ({:+.2}%, {})",
+                                            data.price, data.currency, data.change_pct, data.source
                                         ),
                                         None => "<b>Kurs:</b> ⚠️ Brak danych".to_string(),
                                     };
