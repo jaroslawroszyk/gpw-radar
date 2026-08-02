@@ -1340,6 +1340,7 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "serde",
+ "serde_json",
  "teloxide",
  "tokio",
  "toml",

@@ -31,6 +31,50 @@ pub struct AppConfig {
     pub market_sources: Vec<MarketSourceConfig>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PriceData {
+    pub price: f64,
+    pub previous_close: f64,
+    pub change_pct: f64,
+    pub currency: String,
+}
+
+async fn get_price_from_yahoo(ticker: &str) -> Option<PriceData> {
+    let url = format!(
+        "https://query1.finance.yahoo.com/v8/finance/chart/{}",
+        ticker
+    );
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0")
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?;
+
+    let json: serde_json::Value = res.json().await.ok()?;
+    let meta = &json["chart"]["result"][0]["meta"];
+
+    let price = meta["regularMarketPrice"].as_f64()?;
+    let previous_close = meta["chartPreviousClose"].as_f64().unwrap_or(price);
+    let currency = meta["currency"].as_str().unwrap_or("PLN").to_string();
+
+    let change_pct = if previous_close > 0.0 {
+        ((price - previous_close) / previous_close) * 100.0
+    } else {
+        0.0
+    };
+
+    Some(PriceData {
+        price,
+        previous_close,
+        change_pct,
+        currency,
+    })
+}
+
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Dostępne komendy:")]
 enum Command {
@@ -147,10 +191,18 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
                                         "Dopasowano komunikat ESPI dla spółki z portfela"
                                     );
 
+                                    let price_header = match get_price_from_yahoo(&stock.ticker).await {
+                                        Some(data) => format!(
+                                            "<b>Kurs:</b> {:.2} {} ({:+.2}%)",
+                                            data.price, data.currency, data.change_pct
+                                        ),
+                                        None => "<b>Kurs:</b> ⚠️ Brak danych".to_string(),
+                                    };
+
                                     let clean_title = sanitize_html(raw_title);
                                     let message = format!(
-                                        "🚨 <b>[KOMUNIKAT - PORTFEL]</b>\n🏢 <b>{} ({})</b>\n📄 <b>Treść:</b> {}\n\n🔗 <a href=\"{}\">Otwórz raport ESPI</a>",
-                                        stock.name, stock.ticker, clean_title, link
+                                        "🚨 <b>[KOMUNIKAT - PORTFEL]</b>\n🏢 <b>{} ({})</b>\n{}\n📄 <b>Treść:</b> {}\n\n🔗 <a href=\"{}\">Otwórz raport ESPI</a>",
+                                        stock.name, stock.ticker, price_header, clean_title, link
                                     );
 
                                     let _ = bot
