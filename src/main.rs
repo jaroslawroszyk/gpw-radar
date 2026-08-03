@@ -159,20 +159,110 @@ enum Command {
     Help,
     #[command(description = "Wyświetla pełną listę śledzonych spółek.")]
     Portfel,
+    #[command(description = "Wyświetla tylko spółki dodane ręcznie.")]
+    Lista,
+    #[command(description = "Dodaje spółkę. Składnia: /dodaj TICKER")]
+    Dodaj(String),
+    #[command(description = "Usuwa spółkę z bazy. Składnia: /usun TICKER")]
+    Usun(String),
 }
 
-async fn answer_command(bot: Bot, msg: Message, cmd: Command, config: Arc<AppConfig>) -> ResponseResult<()> {
+async fn answer_command(
+    bot: Bot,
+    msg: Message,
+    cmd: Command,
+    config: Arc<AppConfig>,
+    db: Arc<Mutex<Connection>>,
+) -> ResponseResult<()> {
     match cmd {
         Command::Start | Command::Help => {
             bot.send_message(msg.chat.id, Command::descriptions().to_string())
                 .await?;
         }
         Command::Portfel => {
+            let tracked_stocks = {
+                let conn = db.lock().unwrap();
+                get_all_tracked_stocks(&config, &conn)
+            };
             let mut text = String::from("Śledzone spółki:\n");
-            for stock in &config.stocks {
+            for stock in &tracked_stocks {
                 text.push_str(&format!("- {} ({})\n", stock.name, stock.ticker));
             }
             bot.send_message(msg.chat.id, text).await?;
+        }
+        Command::Lista => {
+            let custom_stocks = {
+                let conn = db.lock().unwrap();
+                get_custom_stocks_from_db(&conn)
+            };
+            if custom_stocks.is_empty() {
+                bot.send_message(msg.chat.id, "📌 Brak ręcznie dodanych spółek w bazie.")
+                    .await?;
+            } else {
+                let mut text = String::from("Ręcznie dodane spółki:\n");
+                for stock in custom_stocks {
+                    text.push_str(&format!("- {} ({})\n", stock.name, stock.ticker));
+                }
+                bot.send_message(msg.chat.id, text).await?;
+            }
+        }
+        Command::Dodaj(raw_ticker) => {
+            let clean_ticker = raw_ticker.trim().to_uppercase();
+            if clean_ticker.is_empty() {
+                bot.send_message(msg.chat.id, "⚠️ Podaj ticker spółki! Przykład: /dodaj XTB.WA")
+                    .await?;
+                return Ok(());
+            }
+            let full_ticker = if !clean_ticker.contains('.') {
+                format!("{}.WA", clean_ticker)
+            } else {
+                clean_ticker
+            };
+
+            if let Some(price) = get_stock_price(&full_ticker).await {
+                let company_name = full_ticker.replace(".WA", "");
+                let success = {
+                    let conn = db.lock().unwrap();
+                    add_custom_stock_to_db(&conn, &full_ticker, &company_name)
+                };
+                if success {
+                    bot.send_message(
+                        msg.chat.id,
+                        format!(
+                            "✅ Dodano {} ({}). Kurs: {:.2} {}",
+                            company_name, full_ticker, price.price, price.currency
+                        ),
+                    )
+                    .await?;
+                } else {
+                    bot.send_message(msg.chat.id, "⚠️ Błąd zapisu do bazy.").await?;
+                }
+            } else {
+                bot.send_message(msg.chat.id, format!("❌ Nie znaleziono spółki {}.", full_ticker))
+                    .await?;
+            }
+        }
+        Command::Usun(raw_ticker) => {
+            let clean_ticker = raw_ticker.trim().to_uppercase();
+            let full_ticker = if !clean_ticker.contains('.') {
+                format!("{}.WA", clean_ticker)
+            } else {
+                clean_ticker
+            };
+            let removed = {
+                let conn = db.lock().unwrap();
+                remove_custom_stock_from_db(&conn, &full_ticker)
+            };
+            if removed {
+                bot.send_message(msg.chat.id, format!("🗑 Usunięto spółkę {} z bazy.", full_ticker))
+                    .await?;
+            } else {
+                bot.send_message(
+                    msg.chat.id,
+                    format!("⚠️ Spółka {} nie znajdowała się w bazie custom_stocks.", full_ticker),
+                )
+                .await?;
+            }
         }
     }
     Ok(())
@@ -186,6 +276,15 @@ fn init_db() -> Connection {
             title TEXT,
             ticker TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS custom_stocks (
+            ticker TEXT PRIMARY KEY,
+            name TEXT NOT NULL
         )",
         [],
     )
@@ -219,6 +318,54 @@ fn mark_as_seen(conn: &Connection, news_id: &str, title: &str, ticker: &str) {
     );
 }
 
+fn add_custom_stock_to_db(conn: &Connection, ticker: &str, name: &str) -> bool {
+    conn.execute(
+        "INSERT OR REPLACE INTO custom_stocks (ticker, name) VALUES (?1, ?2)",
+        [ticker, name],
+    )
+    .is_ok()
+}
+
+fn remove_custom_stock_from_db(conn: &Connection, ticker: &str) -> bool {
+    let count = conn
+        .execute("DELETE FROM custom_stocks WHERE ticker = ?1", [ticker])
+        .unwrap_or(0);
+    count > 0
+}
+
+fn get_custom_stocks_from_db(conn: &Connection) -> Vec<StockConfig> {
+    let mut stmt = match conn.prepare("SELECT ticker, name FROM custom_stocks") {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+
+    let stock_iter = stmt
+        .query_map([], |row| {
+            let ticker: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            Ok(StockConfig {
+                ticker,
+                name,
+                keywords: vec![],
+            })
+        })
+        .unwrap();
+
+    stock_iter.flatten().collect()
+}
+
+fn get_all_tracked_stocks(config: &AppConfig, conn: &Connection) -> Vec<StockConfig> {
+    let mut all_stocks = config.stocks.clone();
+    let custom_stocks = get_custom_stocks_from_db(conn);
+
+    for cs in custom_stocks {
+        if !all_stocks.iter().any(|s| s.ticker == cs.ticker) {
+            all_stocks.push(cs);
+        }
+    }
+    all_stocks
+}
+
 fn sanitize_html(input: &str) -> String {
     input
         .replace('&', "&amp;")
@@ -241,7 +388,12 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
     let espi_rss_url = "https://www.bankier.pl/rss/wiadomosci.xml";
 
     loop {
-        for stock in &config.stocks {
+        let tracked_stocks = {
+            let conn = db.lock().unwrap();
+            get_all_tracked_stocks(&config, &conn)
+        };
+
+        for stock in &tracked_stocks {
             if let Some(price) = get_stock_price(&stock.ticker).await {
                 if price.change_pct.abs() >= 3.0 {
                     let should_alert = {
@@ -297,7 +449,7 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
                         };
 
                         if !link.is_empty() && !is_seen {
-                            for stock in &config.stocks {
+                            for stock in &tracked_stocks {
                                 let mut combined_keywords = stock.keywords.clone();
                                 combined_keywords.push(stock.name.clone());
                                 combined_keywords.push(stock.ticker.replace(".WA", ""));
@@ -443,7 +595,7 @@ async fn main() {
             .filter_command::<Command>()
             .endpoint(answer_command),
     )
-    .dependencies(dptree::deps![shared_config])
+    .dependencies(dptree::deps![Arc::clone(&shared_config), Arc::clone(&db)])
     .enable_ctrlc_handler()
     .build()
     .dispatch()
