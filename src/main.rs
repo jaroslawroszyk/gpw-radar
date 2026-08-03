@@ -1,5 +1,8 @@
+use chrono::{Datelike, Timelike, Utc, Weekday};
+use chrono_tz::Europe::Warsaw;
 use rusqlite::Connection;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -150,6 +153,123 @@ async fn get_stock_price(ticker: &str) -> Option<PriceData> {
     get_price_from_bankier(ticker).await
 }
 
+fn is_trading_hours() -> bool {
+    let now = Utc::now().with_timezone(&Warsaw);
+    let weekday = now.weekday();
+    let hour = now.hour();
+    let minute = now.minute();
+
+    let is_weekend = weekday == Weekday::Sat || weekday == Weekday::Sun;
+
+    !is_weekend
+        && (hour > 8 || (hour == 8 && minute >= 30))
+        && (hour < 17 || (hour == 17 && minute <= 30))
+}
+
+async fn fetch_strefa_inwestorow_calendar(stocks: &[StockConfig]) -> HashMap<String, String> {
+    let mut calendar_map = HashMap::new();
+    let url = "https://strefainwestorow.pl/dane/raporty/lista-publikacji-raportow-okresowych";
+
+    let targets: Vec<String> = stocks
+        .iter()
+        .map(|s| s.ticker.replace(".WA", "").to_uppercase())
+        .collect();
+
+    let client = reqwest::Client::new();
+    if let Ok(res) = client
+        .get(url)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        .send()
+        .await
+    {
+        if let Ok(html_text) = res.text().await {
+            let document = scraper::Html::parse_document(&html_text);
+            let row_selector = scraper::Selector::parse("tr").unwrap();
+            let cell_selector = scraper::Selector::parse("td, th").unwrap();
+
+            for row in document.select(&row_selector) {
+                let cells: Vec<String> = row
+                    .select(&cell_selector)
+                    .map(|c| c.text().collect::<String>().trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
+                if cells.len() >= 3 {
+                    for cell in &cells {
+                        let candidate = cell.to_uppercase();
+                        if targets.iter().any(|t| t == &candidate) {
+                            if let Some(date) = cells.iter().find(|c| c.contains("-") && c.len() >= 8) {
+                                let report_type = cells
+                                    .last()
+                                    .cloned()
+                                    .unwrap_or_else(|| "Raport okresowy".to_string());
+                                calendar_map.insert(candidate, format!("{} ({})", date, report_type));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    calendar_map
+}
+
+async fn send_weekly_summary(bot: &Bot, chat_id: ChatId, stocks: &[StockConfig], is_daily_close: bool) {
+    let title = if is_daily_close {
+        "🔔 <b>PODSUMOWANIE ZAMKNIĘCIA SESJI GPW</b>"
+    } else {
+        "📅 <b>PODSUMOWANIE PORTFELA I KALENDARZ GPW</b>"
+    };
+
+    let mut message = format!("{}\n\n📈 <b>Status Twoich Spółek:</b>\n", title);
+
+    let mut best_stock: Option<(String, f64)> = None;
+    let mut worst_stock: Option<(String, f64)> = None;
+
+    for stock in stocks {
+        if let Some(price) = get_stock_price(&stock.ticker).await {
+            let trend = if price.change_pct >= 0.0 { "📈" } else { "📉" };
+            message.push_str(&format!(
+                "• <b>{} ({})</b>: {:.2} {} ({} {:+.2}%)\n",
+                stock.name, stock.ticker, price.price, price.currency, trend, price.change_pct
+            ));
+
+            if best_stock.as_ref().map_or(true, |b| price.change_pct > b.1) {
+                best_stock = Some((stock.name.clone(), price.change_pct));
+            }
+            if worst_stock.as_ref().map_or(true, |w| price.change_pct < w.1) {
+                worst_stock = Some((stock.name.clone(), price.change_pct));
+            }
+        } else {
+            message.push_str(&format!("• <b>{}</b>: ⚠️ Błąd pobierania kursu\n", stock.name));
+        }
+    }
+
+    if is_daily_close {
+        if let (Some(best), Some(worst)) = (best_stock, worst_stock) {
+            message.push_str(&format!(
+                "\n🏆 <b>Lider dnia:</b> {} ({:+.2}%)\n🔻 <b>Maruder dnia:</b> {} ({:+.2}%)\n",
+                best.0, best.1, worst.0, worst.1
+            ));
+        }
+    }
+
+    let strefa_calendar = fetch_strefa_inwestorow_calendar(stocks).await;
+
+    message.push_str("\n🗓 <b>Nadchodzące Raporty Finansowe:</b>\n");
+    for stock in stocks {
+        let clean_ticker = stock.ticker.replace(".WA", "").to_uppercase();
+        let report_info = strefa_calendar
+            .get(&clean_ticker)
+            .cloned()
+            .unwrap_or_else(|| "Brak daty w kalendarzu".to_string());
+        message.push_str(&format!("• <b>{}</b>: {}\n", stock.name, report_info));
+    }
+
+    let _ = bot.send_message(chat_id, message).parse_mode(ParseMode::Html).await;
+}
+
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Dostępne komendy:")]
 enum Command {
@@ -157,6 +277,8 @@ enum Command {
     Start,
     #[command(description = "Wyświetla powitanie i menu pomocy.")]
     Help,
+    #[command(description = "Pobiera natychmiastowy status cenowy portfela oraz kalendarz.")]
+    Status,
     #[command(description = "Wyświetla pełną listę śledzonych spółek.")]
     Portfel,
     #[command(description = "Wyświetla tylko spółki dodane ręcznie.")]
@@ -178,6 +300,15 @@ async fn answer_command(
         Command::Start | Command::Help => {
             bot.send_message(msg.chat.id, Command::descriptions().to_string())
                 .await?;
+        }
+        Command::Status => {
+            bot.send_message(msg.chat.id, "⏳ Pobieram aktualne kursy i kalendarz...")
+                .await?;
+            let tracked_stocks = {
+                let conn = db.lock().unwrap();
+                get_all_tracked_stocks(&config, &conn)
+            };
+            send_weekly_summary(&bot, msg.chat.id, &tracked_stocks, false).await;
         }
         Command::Portfel => {
             let tracked_stocks = {
@@ -386,12 +517,34 @@ fn matches_keywords<'a>(title: &'a str, keywords: &'a [String]) -> Option<&'a st
 
 async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc<Mutex<Connection>>) {
     let espi_rss_url = "https://www.bankier.pl/rss/wiadomosci.xml";
+    let mut weekly_summary_sent_this_week = false;
+    let mut daily_close_sent_today = false;
 
     loop {
+        let now = Utc::now().with_timezone(&Warsaw);
+        let trading_active = is_trading_hours();
+
         let tracked_stocks = {
             let conn = db.lock().unwrap();
             get_all_tracked_stocks(&config, &conn)
         };
+
+        if trading_active && now.hour() == 17 && now.minute() >= 5 && !daily_close_sent_today {
+            send_weekly_summary(&bot, chat_id, &tracked_stocks, true).await;
+            daily_close_sent_today = true;
+        }
+        if now.hour() != 17 {
+            daily_close_sent_today = false;
+        }
+
+        if now.weekday() == Weekday::Sun && now.hour() == 18 {
+            if !weekly_summary_sent_this_week {
+                send_weekly_summary(&bot, chat_id, &tracked_stocks, false).await;
+                weekly_summary_sent_this_week = true;
+            }
+        } else {
+            weekly_summary_sent_this_week = false;
+        }
 
         for stock in &tracked_stocks {
             if let Some(price) = get_stock_price(&stock.ticker).await {
@@ -552,7 +705,12 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(3 * 60)).await;
+        let sleep_duration = if trading_active {
+            Duration::from_secs(3 * 60)
+        } else {
+            Duration::from_secs(30 * 60)
+        };
+        tokio::time::sleep(sleep_duration).await;
     }
 }
 
