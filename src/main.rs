@@ -153,6 +153,32 @@ async fn get_stock_price(ticker: &str) -> Option<PriceData> {
     get_price_from_bankier(ticker).await
 }
 
+fn parse_mar_insider_transaction(title: &str) -> Option<String> {
+    let lower = title.to_lowercase();
+    let is_mar = lower.contains("art. 19")
+        || lower.contains("powiadomienie o transakcji")
+        || lower.contains("zawiadomienie o transakcjach")
+        || (lower.contains("nabycie") && lower.contains("akcji"))
+        || (lower.contains("zbycie") && lower.contains("akcji"));
+
+    if !is_mar {
+        return None;
+    }
+
+    let action = if lower.contains("nabycie") || lower.contains("zakup") || lower.contains("kupno") {
+        "🟢 <b>KUPNO (Nabycie)</b>"
+    } else if lower.contains("zbycie") || lower.contains("sprzedaż") {
+        "🔴 <b>SPRZEDAŻ (Zbycie)</b>"
+    } else {
+        "📊 <b>TRANSAKCJA INSIDERA</b>"
+    };
+
+    Some(format!(
+        "⚠️ <b>[TRANSAKCJA INSIDERA / ART. 19 MAR]</b>\nTyp: {}\n📄 <b>Nagłówek:</b> {}",
+        action, title
+    ))
+}
+
 fn is_trading_hours() -> bool {
     let now = Utc::now().with_timezone(&Warsaw);
     let weekday = now.weekday();
@@ -629,10 +655,14 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
                                         None => "<b>Kurs:</b> ⚠️ Brak danych".to_string(),
                                     };
 
+                                    let mar_text = parse_mar_insider_transaction(raw_title)
+                                        .map(|t| format!("\n{}\n", t))
+                                        .unwrap_or_default();
+
                                     let clean_title = sanitize_html(raw_title);
                                     let message = format!(
-                                        "🚨 <b>[KOMUNIKAT - PORTFEL]</b>\n🏢 <b>{} ({})</b>\n{}\n📄 <b>Treść:</b> {}\n\n🔗 <a href=\"{}\">Otwórz raport ESPI</a>",
-                                        stock.name, stock.ticker, price_header, clean_title, link
+                                        "🚨 <b>[KOMUNIKAT - PORTFEL]</b>\n🏢 <b>{} ({})</b>\n{}\n{}\n📄 <b>Treść:</b> {}\n\n🔗 <a href=\"{}\">Otwórz raport ESPI</a>",
+                                        stock.name, stock.ticker, price_header, mar_text, clean_title, link
                                     );
 
                                     let _ = bot
