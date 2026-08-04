@@ -153,6 +153,87 @@ async fn get_stock_price(ticker: &str) -> Option<PriceData> {
     get_price_from_bankier(ticker).await
 }
 
+async fn summarize_espi_with_ai(http_client: &reqwest::Client, title: &str) -> Option<String> {
+    let api_key = std::env::var("GROQ_API_KEY").ok()?;
+    if api_key.is_empty() {
+        return None;
+    }
+
+    let url = "https://api.groq.com/openai/v1/chat/completions";
+    let prompt = format!(
+        "Jesteś analitykiem giełdowym na GPW. Przeanalizuj poniższy komunikat ESPI i podaj odpowiedź w ścisłym formacie:\n\n\
+        1. Linijka 1: Ocena wpływu w formacie: 🟢 [Impact: X/10 | BULLISH/BEARISH/NEUTRAL] (gdzie X to ocena 1-10)\n\
+        2. Linijka 2: Streszczenie faktów (max 2 zdania po polsku, kwoty, daty, partnerzy).\n\n\
+        Komunikat: {}",
+        title
+    );
+
+    let body = serde_json::json!({
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+        "max_tokens": 140
+    });
+
+    let res = http_client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?;
+
+    let json_res: serde_json::Value = res.json().await.ok()?;
+    let ai_summary = json_res["choices"][0]["message"]["content"]
+        .as_str()?
+        .trim()
+        .to_string();
+
+    Some(ai_summary)
+}
+
+async fn evaluate_value_investing_with_ai(http_client: &reqwest::Client, title: &str) -> Option<String> {
+    let api_key = std::env::var("GROQ_API_KEY").ok()?;
+    if api_key.is_empty() {
+        return None;
+    }
+
+    let url = "https://api.groq.com/openai/v1/chat/completions";
+    let prompt = format!(
+        "Jesteś inwestorem w wartość (Value Investor) kierującym się zasadami Benjamina Grahama i Warrena Buffetta. \
+        Przeanalizuj komunikat ESPI z GPW pod kątem długoterminowej wartości, fosy rynkowej (Moat) i ryzyka. Podaj zwięzłą ocenę w MAX 2 zdaniach po polsku.\n\n\
+        Komunikat: {}",
+        title
+    );
+
+    let body = serde_json::json!({
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+        "max_tokens": 120
+    });
+
+    let res = http_client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?;
+
+    let json_res: serde_json::Value = res.json().await.ok()?;
+    let evaluation = json_res["choices"][0]["message"]["content"]
+        .as_str()?
+        .trim()
+        .to_string();
+
+    Some(evaluation)
+}
+
 fn parse_mar_insider_transaction(title: &str) -> Option<String> {
     let lower = title.to_lowercase();
     let is_mar = lower.contains("art. 19")
@@ -543,6 +624,7 @@ fn matches_keywords<'a>(title: &'a str, keywords: &'a [String]) -> Option<&'a st
 
 async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc<Mutex<Connection>>) {
     let espi_rss_url = "https://www.bankier.pl/rss/wiadomosci.xml";
+    let ai_client = reqwest::Client::new();
     let mut weekly_summary_sent_this_week = false;
     let mut daily_close_sent_today = false;
 
@@ -659,10 +741,26 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
                                         .map(|t| format!("\n{}\n", t))
                                         .unwrap_or_default();
 
+                                    let ai_summary_text = match summarize_espi_with_ai(&ai_client, raw_title).await {
+                                        Some(summary) => format!(
+                                            "\n🤖 <b>Skrót & Sentyment AI:</b>\n<i>{}</i>",
+                                            sanitize_html(&summary)
+                                        ),
+                                        None => String::new(),
+                                    };
+
+                                    let ai_buffett_text = match evaluate_value_investing_with_ai(&ai_client, raw_title).await {
+                                        Some(eval) => format!(
+                                            "\n🏛 <b>Ocena Buffetta & Grahama:</b> <i>{}</i>\n",
+                                            sanitize_html(&eval)
+                                        ),
+                                        None => String::new(),
+                                    };
+
                                     let clean_title = sanitize_html(raw_title);
                                     let message = format!(
-                                        "🚨 <b>[KOMUNIKAT - PORTFEL]</b>\n🏢 <b>{} ({})</b>\n{}\n{}\n📄 <b>Treść:</b> {}\n\n🔗 <a href=\"{}\">Otwórz raport ESPI</a>",
-                                        stock.name, stock.ticker, price_header, mar_text, clean_title, link
+                                        "🚨 <b>[KOMUNIKAT - PORTFEL]</b>\n🏢 <b>{} ({})</b>\n{}\n{}\n{}\n{}\n📄 <b>Treść:</b> {}\n\n🔗 <a href=\"{}\">Otwórz raport ESPI</a>",
+                                        stock.name, stock.ticker, price_header, mar_text, ai_summary_text, ai_buffett_text, clean_title, link
                                     );
 
                                     let _ = bot
