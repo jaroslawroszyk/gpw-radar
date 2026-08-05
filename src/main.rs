@@ -37,6 +37,13 @@ pub struct AppConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct CustomPriceAlert {
+    pub ticker: String,
+    pub target_price: f64,
+    pub is_below: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct PriceData {
     pub price: f64,
     pub previous_close: f64,
@@ -657,6 +664,12 @@ enum Command {
     Analiza(String),
     #[command(description = "Generuje wykres cenowy z wskaźnikami. Składnia: /wykres TICKER")]
     Wykres(String),
+    #[command(
+        description = "Ustawia spersonalizowany alert cenowy. Składnia: /alert TICKER < 120.50 lub /alert TICKER > 150"
+    )]
+    Alert(String),
+    #[command(description = "Generuje raport portfela w pliku CSV.")]
+    Eksport,
 }
 
 async fn answer_command(
@@ -848,6 +861,66 @@ async fn answer_command(
                 .await?;
             }
         }
+        Command::Alert(args) => {
+            let parts: Vec<&str> = args.split_whitespace().collect();
+            if parts.len() < 3 {
+                bot.send_message(
+                    msg.chat.id,
+                    "⚠️ Składnia: /alert TICKER < PROG lub /alert TICKER > PROG\nPrzykład: /alert CDR < 115.50",
+                )
+                .await?;
+                return Ok(());
+            }
+
+            let raw_ticker = parts[0].to_uppercase();
+            let full_ticker = if !raw_ticker.contains('.') {
+                format!("{}.WA", raw_ticker)
+            } else {
+                raw_ticker
+            };
+
+            let operator = parts[1];
+            let target_price: f64 = match parts[2].replace(",", ".").parse() {
+                Ok(val) => val,
+                Err(_) => {
+                    bot.send_message(msg.chat.id, "⚠️ Podano niepoprawną kwotę docelową!")
+                        .await?;
+                    return Ok(());
+                }
+            };
+
+            let is_below = operator == "<";
+
+            {
+                let conn = db.lock().unwrap();
+                add_user_price_alert(&conn, &full_ticker, target_price, is_below);
+            }
+
+            let direction = if is_below { "spadnie poniżej" } else { "wzrośnie powyżej" };
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "✅ Ustawiono alert! Powiadomię Cię, gdy kurs {} {} {:.2} PLN.",
+                    full_ticker, direction, target_price
+                ),
+            )
+            .await?;
+        }
+        Command::Eksport => {
+            let tracked_stocks = {
+                let conn = db.lock().unwrap();
+                get_all_tracked_stocks(&config, &conn)
+            };
+            let csv_bytes = {
+                let conn = db.lock().unwrap();
+                export_portfolio_csv(&tracked_stocks, &conn)
+            };
+
+            let document = InputFile::memory(csv_bytes).file_name("portfel_gpw.csv");
+            bot.send_document(msg.chat.id, document)
+                .caption("📄 Raport portfela w formacie CSV")
+                .await?;
+        }
     }
     Ok(())
 }
@@ -869,6 +942,17 @@ fn init_db() -> Connection {
         "CREATE TABLE IF NOT EXISTS custom_stocks (
             ticker TEXT PRIMARY KEY,
             name TEXT NOT NULL
+        )",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS user_price_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            target_price REAL NOT NULL,
+            is_below INTEGER NOT NULL
         )",
         [],
     )
@@ -1053,6 +1137,52 @@ fn get_recent_titles_for_ticker(conn: &Connection, ticker: &str) -> Vec<String> 
     title_iter.flatten().collect()
 }
 
+fn add_user_price_alert(conn: &Connection, ticker: &str, target_price: f64, is_below: bool) {
+    let _ = conn.execute(
+        "INSERT INTO user_price_alerts (ticker, target_price, is_below) VALUES (?1, ?2, ?3)",
+        (ticker, target_price, if is_below { 1 } else { 0 }),
+    );
+}
+
+fn get_user_price_alerts(conn: &Connection) -> Vec<(i64, CustomPriceAlert)> {
+    let mut stmt = match conn.prepare("SELECT id, ticker, target_price, is_below FROM user_price_alerts") {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+
+    let alert_iter = stmt
+        .query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let ticker: String = row.get(1)?;
+            let target_price: f64 = row.get(2)?;
+            let is_below_int: i32 = row.get(3)?;
+            Ok((
+                id,
+                CustomPriceAlert {
+                    ticker,
+                    target_price,
+                    is_below: is_below_int == 1,
+                },
+            ))
+        })
+        .unwrap();
+
+    alert_iter.flatten().collect()
+}
+
+fn remove_user_price_alert(conn: &Connection, id: i64) {
+    let _ = conn.execute("DELETE FROM user_price_alerts WHERE id = ?1", [id]);
+}
+
+fn export_portfolio_csv(stocks: &[StockConfig], conn: &Connection) -> Vec<u8> {
+    let mut csv_data = String::from("Ticker,Nazwa,Zbycie_Muted\n");
+    for s in stocks {
+        let is_muted = is_stock_muted(conn, &s.ticker);
+        csv_data.push_str(&format!("{},\"{}\",{}\n", s.ticker, s.name, is_muted));
+    }
+    csv_data.into_bytes()
+}
+
 fn get_all_tracked_stocks(config: &AppConfig, conn: &Connection) -> Vec<StockConfig> {
     let mut all_stocks = config.stocks.clone();
     let custom_stocks = get_custom_stocks_from_db(conn);
@@ -1113,6 +1243,33 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
             }
         } else {
             weekly_summary_sent_this_week = false;
+        }
+
+        let active_user_alerts = {
+            let conn = db.lock().unwrap();
+            get_user_price_alerts(&conn)
+        };
+
+        for (alert_id, alert) in active_user_alerts {
+            if let Some(price) = get_stock_price(&alert.ticker).await {
+                let triggered = if alert.is_below {
+                    price.price <= alert.target_price
+                } else {
+                    price.price >= alert.target_price
+                };
+
+                if triggered {
+                    let dir_text = if alert.is_below { "spadł poniżej" } else { "wzrósł powyżej" };
+                    let msg_text = format!(
+                        "🎯 <b>[ALERT CENOWY OSIĄGNIĘTY]</b>\n🏢 <b>{}</b>\n💵 Aktualny kurs: <b>{:.2} {}</b> ({})\n🎯 Próg docelowy: {:.2} PLN",
+                        alert.ticker, price.price, price.currency, dir_text, alert.target_price
+                    );
+                    let _ = bot.send_message(chat_id, msg_text).parse_mode(ParseMode::Html).await;
+
+                    let conn = db.lock().unwrap();
+                    remove_user_price_alert(&conn, alert_id);
+                }
+            }
         }
 
         for stock in &tracked_stocks {
