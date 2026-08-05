@@ -153,6 +153,85 @@ async fn get_stock_price(ticker: &str) -> Option<PriceData> {
     get_price_from_bankier(ticker).await
 }
 
+async fn generate_full_on_demand_analysis(
+    http_client: &reqwest::Client,
+    ticker: &str,
+    recent_titles: &[String],
+    price_info: Option<&PriceData>,
+) -> String {
+    let api_key = match std::env::var("GROQ_API_KEY") {
+        Ok(k) if !k.is_empty() => k,
+        _ => return "⚠️ Brak skonfigurowanego klucza GROQ_API_KEY w środowisku.".to_string(),
+    };
+
+    let price_str = match price_info {
+        Some(p) => format!("{:.2} {} (zmiana: {:+.2}%)", p.price, p.currency, p.change_pct),
+        None => "Brak danych cenowych".to_string(),
+    };
+
+    let titles_str = if recent_titles.is_empty() {
+        "Brak ostatnich komunikatów w bazie".to_string()
+    } else {
+        recent_titles
+            .iter()
+            .map(|t| t.replace('"', "'").replace('\n', " "))
+            .collect::<Vec<String>>()
+            .join("\n• ")
+    };
+
+    let prompt = format!(
+        "Jesteś Senior Analitykiem GPW. Przygotuj zwięzły raport analityczny dla spółki {}.\n\n\
+        Aktualny kurs: {}\n\
+        Ostatnie komunikaty spółki:\n• {}\n\n\
+        Napisz raport z podziałem na:\n\
+        1. 📊 Synteza sytuacji (Co się dzieje w spółce)\n\
+        2. 🛡 Ocena ryzyka i potencjału (Fundamental Score 1-10)\n\
+        3. 🎯 Rekomendacja dla inwestora wartościowego\n\n\
+        Używaj prostego tekstu bez formatowania Markdown (bez gwiazdek i płotków).",
+        ticker, price_str, titles_str
+    );
+
+    let url = "https://api.groq.com/openai/v1/chat/completions";
+    let body = serde_json::json!({
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "max_tokens": 500
+    });
+
+    let res = match http_client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(Duration::from_secs(12))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return format!("⚠️ Błąd sieciowy podczas łączenia z Groq: {}", e),
+    };
+
+    let status = res.status();
+    let text_response = match res.text().await {
+        Ok(t) => t,
+        Err(e) => return format!("⚠️ Błąd odczytu odpowiedzi z Groq: {}", e),
+    };
+
+    if !status.is_success() {
+        error!(status = %status, response = %text_response, "❌ Groq API zwróciło błąd HTTP");
+        return format!("⚠️ API Groq zwróciło błąd HTTP {}: {}", status, text_response);
+    }
+
+    if let Ok(json_res) = serde_json::from_str::<serde_json::Value>(&text_response) {
+        if let Some(content) = json_res["choices"][0]["message"]["content"].as_str() {
+            return content.to_string();
+        }
+    }
+
+    "⚠️ Nie udało się sparsować odpowiedzi z modelu AI.".to_string()
+}
+
 async fn summarize_espi_with_ai(http_client: &reqwest::Client, title: &str) -> Option<String> {
     let api_key = std::env::var("GROQ_API_KEY").ok()?;
     if api_key.is_empty() {
@@ -394,6 +473,8 @@ enum Command {
     Dodaj(String),
     #[command(description = "Usuwa spółkę z bazy. Składnia: /usun TICKER")]
     Usun(String),
+    #[command(description = "Generuje syntetyczną analizę AI spółki. Składnia: /analiza TICKER")]
+    Analiza(String),
 }
 
 async fn answer_command(
@@ -403,6 +484,8 @@ async fn answer_command(
     config: Arc<AppConfig>,
     db: Arc<Mutex<Connection>>,
 ) -> ResponseResult<()> {
+    let http_client = reqwest::Client::new();
+
     match cmd {
         Command::Start | Command::Help => {
             bot.send_message(msg.chat.id, Command::descriptions().to_string())
@@ -502,6 +585,46 @@ async fn answer_command(
                 .await?;
             }
         }
+        Command::Analiza(raw_ticker) => {
+            let clean_ticker = raw_ticker.trim().to_uppercase();
+            if clean_ticker.is_empty() {
+                bot.send_message(msg.chat.id, "⚠️ Podaj ticker! Przykład: /analiza CDR")
+                    .await?;
+                return Ok(());
+            }
+            let full_ticker = if !clean_ticker.contains('.') {
+                format!("{}.WA", clean_ticker)
+            } else {
+                clean_ticker
+            };
+
+            bot.send_message(
+                msg.chat.id,
+                format!("🧠 Generuję syntezę analityczną AI dla {}...", full_ticker),
+            )
+            .await?;
+
+            let price_info = get_stock_price(&full_ticker).await;
+
+            let recent_titles = {
+                let conn = db.lock().unwrap();
+                let mut titles = get_recent_titles_for_ticker(&conn, &full_ticker);
+                if titles.is_empty() {
+                    titles = get_recent_titles_for_ticker(&conn, &full_ticker.replace(".WA", ""));
+                }
+                titles
+            };
+
+            let analysis = generate_full_on_demand_analysis(
+                &http_client,
+                &full_ticker,
+                &recent_titles,
+                price_info.as_ref(),
+            )
+            .await;
+
+            bot.send_message(msg.chat.id, analysis).await?;
+        }
     }
     Ok(())
 }
@@ -590,6 +713,18 @@ fn get_custom_stocks_from_db(conn: &Connection) -> Vec<StockConfig> {
         .unwrap();
 
     stock_iter.flatten().collect()
+}
+
+fn get_recent_titles_for_ticker(conn: &Connection, ticker: &str) -> Vec<String> {
+    let mut stmt = match conn
+        .prepare("SELECT title FROM seen_news WHERE ticker = ?1 ORDER BY created_at DESC LIMIT 5")
+    {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+
+    let title_iter = stmt.query_map([ticker], |row| row.get(0)).unwrap();
+    title_iter.flatten().collect()
 }
 
 fn get_all_tracked_stocks(config: &AppConfig, conn: &Connection) -> Vec<StockConfig> {
