@@ -153,6 +153,184 @@ async fn get_stock_price(ticker: &str) -> Option<PriceData> {
     get_price_from_bankier(ticker).await
 }
 
+pub struct TechnicalIndicators {
+    pub rsi_14: Option<f64>,
+    pub sma_20: Option<f64>,
+    pub trend_signal: &'static str,
+}
+
+pub fn calculate_indicators(prices: &[f64]) -> TechnicalIndicators {
+    if prices.len() < 14 {
+        return TechnicalIndicators {
+            rsi_14: None,
+            sma_20: None,
+            trend_signal: "NEUTRAL (Za mało danych)",
+        };
+    }
+
+    let mut gains = 0.0;
+    let mut losses = 0.0;
+
+    for window in prices.windows(2).take(14) {
+        let diff = window[1] - window[0];
+        if diff >= 0.0 {
+            gains += diff;
+        } else {
+            losses += diff.abs();
+        }
+    }
+
+    let avg_gain = gains / 14.0;
+    let avg_loss = losses / 14.0;
+
+    let rsi = if avg_loss == 0.0 {
+        100.0
+    } else {
+        let rs = avg_gain / avg_loss;
+        100.0 - (100.0 / (1.0 + rs))
+    };
+
+    let sma_20 = if prices.len() >= 20 {
+        let sum: f64 = prices.iter().rev().take(20).sum();
+        Some(sum / 20.0)
+    } else {
+        None
+    };
+
+    let signal = if rsi > 70.0 {
+        "🔴 OVERBOUGHT (RSI > 70)"
+    } else if rsi < 30.0 {
+        "🟢 OVERSOLD (RSI < 30)"
+    } else {
+        "⚪ NEUTRAL"
+    };
+
+    TechnicalIndicators {
+        rsi_14: Some(rsi),
+        sma_20,
+        trend_signal: signal,
+    }
+}
+
+fn generate_quickchart_url_with_sma(ticker: &str, prices: &[f64]) -> String {
+    let labels: Vec<String> = (1..=prices.len()).map(|i| format!("D{}", i)).collect();
+
+    let chart_config = serde_json::json!({
+        "type": "line",
+        "data": {
+            "labels": labels,
+            "datasets": [
+                {
+                    "label": format!("Kurs {}", ticker),
+                    "data": prices,
+                    "borderColor": "#00a8ff",
+                    "backgroundColor": "rgba(0, 168, 255, 0.05)",
+                    "fill": true,
+                    "borderWidth": 2,
+                    "pointRadius": 1
+                },
+                {
+                    "label": "SMA (5)",
+                    "data": prices.iter().enumerate().map(|(idx, _)| {
+                        if idx >= 4 {
+                            let window = &prices[idx-4..=idx];
+                            Some(window.iter().sum::<f64>() / 5.0)
+                        } else {
+                            None
+                        }
+                    }).collect::<Vec<Option<f64>>>(),
+                    "borderColor": "#ff9f43",
+                    "borderWidth": 1.5,
+                    "fill": false,
+                    "pointRadius": 0
+                }
+            ]
+        },
+        "options": {
+            "title": { "display": true, "text": format!("Wykres z SMA - {}", ticker) },
+            "legend": { "display": true }
+        }
+    });
+
+    let chart_str = chart_config.to_string();
+    format!(
+        "https://quickchart.io/chart?c={}&bkg=white&w=600&h=350",
+        urlencoding::encode(&chart_str)
+    )
+}
+
+async fn get_historical_prices_yahoo(ticker: &str) -> Vec<f64> {
+    let clean_symbol = ticker.replace(".WA", "").to_lowercase();
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .build()
+        .unwrap();
+
+    let stooq_ticker = format!("{}.va", clean_symbol);
+    let stooq_csv_url = format!("https://stooq.pl/q/d/l/?s={}&i=d", stooq_ticker);
+
+    if let Ok(res) = client
+        .get(&stooq_csv_url)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .send()
+        .await
+    {
+        if let Ok(csv_text) = res.text().await {
+            let mut prices = Vec::new();
+            for line in csv_text.lines().skip(1) {
+                let parts: Vec<&str> = line.split(',').collect();
+                if parts.len() >= 5 {
+                    if let Ok(close) = parts[4].trim().parse::<f64>() {
+                        if close > 0.0 {
+                            prices.push(close);
+                        }
+                    }
+                }
+            }
+
+            if prices.len() >= 5 {
+                info!(ticker = %ticker, count = prices.len(), "📊 Sparsowano ceny ze Stooq CSV (.va)");
+                let take_count = prices.len().min(30);
+                return prices[prices.len() - take_count..].to_vec();
+            }
+        }
+    }
+
+    let br_url = format!(
+        "https://www.biznesradar.pl/gielda/wykres-dane/{}",
+        clean_symbol.to_uppercase()
+    );
+    if let Ok(res) = client
+        .get(&br_url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
+        .send()
+        .await
+    {
+        if let Ok(json) = res.json::<serde_json::Value>().await {
+            if let Some(arr) = json.as_array() {
+                let mut prices = Vec::new();
+                for item in arr {
+                    if let Some(price) = item.get(1).and_then(|v| v.as_f64()) {
+                        if price > 0.0 {
+                            prices.push(price);
+                        }
+                    }
+                }
+                if prices.len() >= 5 {
+                    info!(ticker = %ticker, count = prices.len(), "📊 Sparsowano ceny z BiznesRadar");
+                    let take_count = prices.len().min(30);
+                    return prices[prices.len() - take_count..].to_vec();
+                }
+            }
+        }
+    }
+
+    error!(ticker = %ticker, "❌ Brak danych ze wszystkich źródeł wykresowych");
+    vec![]
+}
+
 async fn generate_full_on_demand_analysis(
     http_client: &reqwest::Client,
     ticker: &str,
@@ -475,6 +653,8 @@ enum Command {
     Usun(String),
     #[command(description = "Generuje syntetyczną analizę AI spółki. Składnia: /analiza TICKER")]
     Analiza(String),
+    #[command(description = "Generuje wykres cenowy z wskaźnikami. Składnia: /wykres TICKER")]
+    Wykres(String),
 }
 
 async fn answer_command(
@@ -624,6 +804,47 @@ async fn answer_command(
             .await;
 
             bot.send_message(msg.chat.id, analysis).await?;
+        }
+        Command::Wykres(raw_ticker) => {
+            let clean_ticker = raw_ticker.trim().to_uppercase();
+            if clean_ticker.is_empty() {
+                bot.send_message(msg.chat.id, "⚠️ Podaj ticker! Przykład: /wykres CDR")
+                    .await?;
+                return Ok(());
+            }
+            let full_ticker = if !clean_ticker.contains('.') {
+                format!("{}.WA", clean_ticker)
+            } else {
+                clean_ticker
+            };
+
+            bot.send_message(msg.chat.id, format!("📈 Generuję wykres dla {}...", full_ticker))
+                .await?;
+
+            let prices = get_historical_prices_yahoo(&full_ticker).await;
+            if !prices.is_empty() {
+                let chart_url = generate_quickchart_url_with_sma(&full_ticker, &prices);
+                let tech_info = calculate_indicators(&prices);
+
+                let caption = match tech_info.rsi_14 {
+                    Some(rsi) => format!(
+                        "📈 Wykres z SMA dla {}\n📉 RSI (14): {:.2} | Sygnał: {}",
+                        full_ticker, rsi, tech_info.trend_signal
+                    ),
+                    None => format!("📈 Wykres z SMA dla {}", full_ticker),
+                };
+
+                let _ = bot
+                    .send_photo(msg.chat.id, teloxide::types::InputFile::url(chart_url.parse().unwrap()))
+                    .caption(caption)
+                    .await;
+            } else {
+                bot.send_message(
+                    msg.chat.id,
+                    format!("❌ Nie udało się pobrać danych historycznych dla {}", full_ticker),
+                )
+                .await?;
+            }
         }
     }
     Ok(())
