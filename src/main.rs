@@ -7,7 +7,9 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use teloxide::prelude::*;
-use teloxide::types::ParseMode;
+use teloxide::types::{
+    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ParseMode,
+};
 use teloxide::utils::command::BotCommands;
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, fmt};
@@ -835,7 +837,7 @@ async fn answer_command(
                 };
 
                 let _ = bot
-                    .send_photo(msg.chat.id, teloxide::types::InputFile::url(chart_url.parse().unwrap()))
+                    .send_photo(msg.chat.id, InputFile::url(chart_url.parse().unwrap()))
                     .caption(caption)
                     .await;
             } else {
@@ -867,6 +869,14 @@ fn init_db() -> Connection {
         "CREATE TABLE IF NOT EXISTS custom_stocks (
             ticker TEXT PRIMARY KEY,
             name TEXT NOT NULL
+        )",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS muted_stocks (
+            ticker TEXT PRIMARY KEY
         )",
         [],
     )
@@ -934,6 +944,101 @@ fn get_custom_stocks_from_db(conn: &Connection) -> Vec<StockConfig> {
         .unwrap();
 
     stock_iter.flatten().collect()
+}
+
+fn is_stock_muted(conn: &Connection, ticker: &str) -> bool {
+    let mut stmt = conn
+        .prepare("SELECT COUNT(*) FROM muted_stocks WHERE ticker = ?1")
+        .unwrap();
+    let count: i64 = stmt.query_row([ticker], |row| row.get(0)).unwrap_or(0);
+    count > 0
+}
+
+fn toggle_mute_stock(conn: &Connection, ticker: &str) -> bool {
+    if is_stock_muted(conn, ticker) {
+        let _ = conn.execute("DELETE FROM muted_stocks WHERE ticker = ?1", [ticker]);
+        false
+    } else {
+        let _ = conn.execute("INSERT OR REPLACE INTO muted_stocks (ticker) VALUES (?1)", [ticker]);
+        true
+    }
+}
+
+fn build_espi_inline_keyboard(ticker: &str) -> InlineKeyboardMarkup {
+    let clean_ticker = ticker.replace(".WA", "");
+    let keyboard = vec![vec![
+        InlineKeyboardButton::callback("📊 Wskaźniki", format!("stats_{}", clean_ticker)),
+        InlineKeyboardButton::callback("📈 Wykres", format!("chart_{}", clean_ticker)),
+        InlineKeyboardButton::callback("🔕 Mute/Unmute", format!("mute_{}", clean_ticker)),
+    ]];
+    InlineKeyboardMarkup::new(keyboard)
+}
+
+async fn handle_callback_query(bot: Bot, q: CallbackQuery, db: Arc<Mutex<Connection>>) -> ResponseResult<()> {
+    if let Some(data) = q.data {
+        let chat_id = q.message.as_ref().map(|m| m.chat.id);
+
+        if data.starts_with("stats_") {
+            let ticker = format!("{}.WA", data.replace("stats_", ""));
+            if let Some(price) = get_stock_price(&ticker).await {
+                let prices = get_historical_prices_yahoo(&ticker).await;
+                let tech_info = calculate_indicators(&prices);
+
+                let rsi_str = match tech_info.rsi_14 {
+                    Some(val) => format!("{:.2}", val),
+                    None => "Brak danych".to_string(),
+                };
+
+                let text = format!(
+                    "📊 <b>WSKAŹNIKI DLA {}</b>\n\n💵 Kurs: {:.2} {}\n📈 Zmiana: {:+.2}%\n\n📉 <b>RSI (14):</b> {}\n🎯 <b>Sygnał:</b> {}\n📊 Źródło danych: {}",
+                    ticker, price.price, price.currency, price.change_pct, rsi_str, tech_info.trend_signal, price.source
+                );
+                if let Some(cid) = chat_id {
+                    bot.send_message(cid, text).parse_mode(ParseMode::Html).await?;
+                }
+            }
+        } else if data.starts_with("chart_") {
+            let ticker = format!("{}.WA", data.replace("chart_", ""));
+            let prices = get_historical_prices_yahoo(&ticker).await;
+            if !prices.is_empty() {
+                let chart_url = generate_quickchart_url_with_sma(&ticker, &prices);
+                let tech_info = calculate_indicators(&prices);
+
+                let caption = match tech_info.rsi_14 {
+                    Some(rsi) => format!(
+                        "📈 Wykres z SMA dla {}\n📉 RSI (14): {:.2} | Sygnał: {}",
+                        ticker, rsi, tech_info.trend_signal
+                    ),
+                    None => format!("📈 Wykres z SMA dla {}", ticker),
+                };
+
+                if let Some(cid) = chat_id {
+                    let _ = bot
+                        .send_photo(cid, InputFile::url(chart_url.parse().unwrap()))
+                        .caption(caption)
+                        .await;
+                }
+            }
+        } else if data.starts_with("mute_") {
+            let ticker = format!("{}.WA", data.replace("mute_", ""));
+            let is_now_muted = {
+                let conn = db.lock().unwrap();
+                toggle_mute_stock(&conn, &ticker)
+            };
+
+            let status_text = if is_now_muted {
+                format!("🔕 Wyciszono powiadomienia ESPI dla spółki {}.", ticker)
+            } else {
+                format!("🔔 Przywrócono powiadomienia ESPI dla spółki {}.", ticker)
+            };
+
+            if let Some(cid) = chat_id {
+                bot.send_message(cid, status_text).await?;
+            }
+        }
+    }
+    bot.answer_callback_query(q.id).await?;
+    Ok(())
 }
 
 fn get_recent_titles_for_ticker(conn: &Connection, ticker: &str) -> Vec<String> {
@@ -1078,6 +1183,15 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
                                         mark_as_seen(&conn, link, raw_title, &stock.ticker);
                                     }
 
+                                    let is_muted = {
+                                        let conn = db.lock().unwrap();
+                                        is_stock_muted(&conn, &stock.ticker)
+                                    };
+                                    if is_muted {
+                                        info!(ticker = %stock.ticker, "Pominięto powiadomienie - spółka jest wyciszona.");
+                                        break;
+                                    }
+
                                     info!(
                                         ticker = %stock.ticker,
                                         keyword = %matched_kw,
@@ -1119,9 +1233,12 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
                                         stock.name, stock.ticker, price_header, mar_text, ai_summary_text, ai_buffett_text, clean_title, link
                                     );
 
+                                    let keyboard = build_espi_inline_keyboard(&stock.ticker);
+
                                     let _ = bot
                                         .send_message(chat_id, message)
                                         .parse_mode(ParseMode::Html)
+                                        .reply_markup(keyboard)
                                         .await;
                                     break;
                                 }
@@ -1231,15 +1348,24 @@ async fn main() {
         run_bot_loop(bg_bot, chat_id, bg_config, bg_db).await;
     });
 
-    Dispatcher::builder(
-        bot,
-        Update::filter_message()
-            .filter_command::<Command>()
-            .endpoint(answer_command),
-    )
-    .dependencies(dptree::deps![Arc::clone(&shared_config), Arc::clone(&db)])
-    .enable_ctrlc_handler()
-    .build()
-    .dispatch()
-    .await;
+    let callback_db = Arc::clone(&db);
+    let handler = dptree::entry()
+        .branch(
+            Update::filter_message()
+                .filter_command::<Command>()
+                .endpoint(answer_command),
+        )
+        .branch(
+            Update::filter_callback_query().endpoint(move |bot: Bot, q: CallbackQuery| {
+                let db_ref = Arc::clone(&callback_db);
+                async move { handle_callback_query(bot, q, db_ref).await }
+            }),
+        );
+
+    Dispatcher::builder(bot, handler)
+        .dependencies(dptree::deps![Arc::clone(&shared_config), Arc::clone(&db)])
+        .enable_ctrlc_handler()
+        .build()
+        .dispatch()
+        .await;
 }
