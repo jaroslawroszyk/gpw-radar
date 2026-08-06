@@ -49,13 +49,11 @@ pub async fn send_weekly_summary(
         }
     }
 
-    if is_daily_close {
-        if let (Some(best), Some(worst)) = (best_stock, worst_stock) {
-            message.push_str(&format!(
-                "\n🏆 <b>Lider dnia:</b> {} ({:+.2}%)\n🔻 <b>Maruder dnia:</b> {} ({:+.2}%)\n",
-                best.0, best.1, worst.0, worst.1
-            ));
-        }
+    if is_daily_close && let (Some(best), Some(worst)) = (best_stock, worst_stock) {
+        message.push_str(&format!(
+            "\n🏆 <b>Lider dnia:</b> {} ({:+.2}%)\n🔻 <b>Maruder dnia:</b> {} ({:+.2}%)\n",
+            best.0, best.1, worst.0, worst.1
+        ));
     }
 
     let strefa_calendar = fetch_strefa_inwestorow_calendar(http_client, stocks).await;

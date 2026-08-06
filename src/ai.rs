@@ -78,8 +78,8 @@ pub async fn generate_full_on_demand_analysis(
 
     let price_str = match price_info {
         Some(p) => format!(
-            "{:.2} {} (zmiana: {:+.2}%)",
-            p.price, p.currency, p.change_pct
+            "{:.2} {} (zmiana: {:+.2}%, poprzednie zamknięcie: {:.2})",
+            p.price, p.currency, p.change_pct, p.previous_close
         ),
         None => "Brak danych cenowych".to_string(),
     };
@@ -140,10 +140,10 @@ pub async fn generate_full_on_demand_analysis(
         );
     }
 
-    if let Ok(json_res) = serde_json::from_str::<serde_json::Value>(&text_response) {
-        if let Some(content) = json_res["choices"][0]["message"]["content"].as_str() {
-            return content.to_string();
-        }
+    if let Ok(json_res) = serde_json::from_str::<serde_json::Value>(&text_response)
+        && let Some(content) = json_res["choices"][0]["message"]["content"].as_str()
+    {
+        return content.to_string();
     }
 
     "⚠️ Nie udało się sparsować odpowiedzi z modelu AI.".to_string()

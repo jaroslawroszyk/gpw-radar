@@ -14,17 +14,15 @@ pub async fn get_historical_prices(client: &reqwest::Client, ticker: &str) -> Ve
         .timeout(Duration::from_secs(6))
         .send()
         .await
-    {
-        if let Ok(csv_text) = res.text().await {
+        && let Ok(csv_text) = res.text().await {
             let mut prices = Vec::new();
             for line in csv_text.lines().skip(1) {
                 let parts: Vec<&str> = line.split(',').collect();
-                if let Some(close) = parts.get(4).and_then(|p| p.trim().parse::<f64>().ok()) {
-                    if close > 0.0 {
+                if let Some(close) = parts.get(4).and_then(|p| p.trim().parse::<f64>().ok())
+                    && close > 0.0 {
                         prices.push(close);
                     }
                 }
-            }
 
             if prices.len() >= 5 {
                 info!(ticker = %ticker, count = prices.len(), "📊 Sparsowano ceny ze Stooq CSV (.va)");
@@ -32,7 +30,6 @@ pub async fn get_historical_prices(client: &reqwest::Client, ticker: &str) -> Ve
                 return prices[prices.len() - take_count..].to_vec();
             }
         }
-    }
 
     let br_url = format!(
         "https://www.biznesradar.pl/gielda/wykres-dane/{}",
@@ -47,21 +44,19 @@ pub async fn get_historical_prices(client: &reqwest::Client, ticker: &str) -> Ve
         .timeout(Duration::from_secs(6))
         .send()
         .await
+        && let Ok(json) = res.json::<serde_json::Value>().await
+        && let Some(arr) = json.as_array()
     {
-        if let Ok(json) = res.json::<serde_json::Value>().await {
-            if let Some(arr) = json.as_array() {
-                let prices: Vec<f64> = arr
-                    .iter()
-                    .filter_map(|item| item.get(1).and_then(|v| v.as_f64()))
-                    .filter(|p| *p > 0.0)
-                    .collect();
+        let prices: Vec<f64> = arr
+            .iter()
+            .filter_map(|item| item.get(1).and_then(|v| v.as_f64()))
+            .filter(|p| *p > 0.0)
+            .collect();
 
-                if prices.len() >= 5 {
-                    info!(ticker = %ticker, count = prices.len(), "📊 Sparsowano ceny z BiznesRadar");
-                    let take_count = prices.len().min(30);
-                    return prices[prices.len() - take_count..].to_vec();
-                }
-            }
+        if prices.len() >= 5 {
+            info!(ticker = %ticker, count = prices.len(), "📊 Sparsowano ceny z BiznesRadar");
+            let take_count = prices.len().min(30);
+            return prices[prices.len() - take_count..].to_vec();
         }
     }
 

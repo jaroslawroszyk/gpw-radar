@@ -103,10 +103,17 @@ pub fn generate_quickchart_url(ticker: &str, prices: &[f64]) -> String {
 
 pub fn chart_caption(ticker: &str, indicators: &TechnicalIndicators) -> String {
     match indicators.rsi_14 {
-        Some(rsi) => format!(
-            "📈 Wykres z SMA dla {}\n📉 RSI (14): {:.2} | Sygnał: {}",
-            ticker, rsi, indicators.trend_signal
-        ),
+        Some(rsi) => {
+            let sma_text = indicators
+                .sma_20
+                .map(|sma| format!(" | SMA (20): {:.2}", sma))
+                .unwrap_or_default();
+
+            format!(
+                "📈 Wykres z SMA dla {}\n📉 RSI (14): {:.2} | Sygnał: {}{}",
+                ticker, rsi, indicators.trend_signal, sma_text
+            )
+        }
         None => format!("📈 Wykres z SMA dla {}", ticker),
     }
 }
