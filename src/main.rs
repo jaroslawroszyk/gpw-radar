@@ -111,7 +111,7 @@ async fn main() {
                 .await;
 
             let _ = loop_handle.await;
-            info!("👋 Wszystkie zadania zostały bezpiecznie zakończone. Aplikacja zatrzymana.");
+            info!("Wszystkie zadania zostały bezpiecznie zakończone. Aplikacja zatrzymana.");
         }
     }
 }
