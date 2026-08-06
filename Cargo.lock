@@ -1792,7 +1792,6 @@ dependencies = [
  "chrono-tz",
  "dotenvy",
  "feed-rs",
- "lazy_static",
  "prometheus",
  "reqwest",
  "rusqlite",
