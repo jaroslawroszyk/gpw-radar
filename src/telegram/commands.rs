@@ -1,5 +1,7 @@
 use crate::ai::generate_full_on_demand_analysis;
-use crate::analysis::{calculate_indicators, chart_caption, generate_quickchart_url, parse_chart_url};
+use crate::analysis::{
+    calculate_indicators, chart_caption, generate_quickchart_url, parse_chart_url,
+};
 use crate::config::AppConfig;
 use crate::db::{
     add_custom_stock_to_db, add_user_price_alert, export_portfolio_csv, get_all_tracked_stocks,
@@ -95,8 +97,11 @@ pub async fn answer_command(
         }
         Command::Dodaj(raw_ticker) => {
             if raw_ticker.trim().is_empty() {
-                bot.send_message(msg.chat.id, "⚠️ Podaj ticker spółki! Przykład: /dodaj XTB.WA")
-                    .await?;
+                bot.send_message(
+                    msg.chat.id,
+                    "⚠️ Podaj ticker spółki! Przykład: /dodaj XTB.WA",
+                )
+                .await?;
                 return Ok(());
             }
             let full_ticker = normalize_ticker(&raw_ticker);
@@ -117,11 +122,15 @@ pub async fn answer_command(
                     )
                     .await?;
                 } else {
-                    bot.send_message(msg.chat.id, "⚠️ Błąd zapisu do bazy.").await?;
+                    bot.send_message(msg.chat.id, "⚠️ Błąd zapisu do bazy.")
+                        .await?;
                 }
             } else {
-                bot.send_message(msg.chat.id, format!("❌ Nie znaleziono spółki {}.", full_ticker))
-                    .await?;
+                bot.send_message(
+                    msg.chat.id,
+                    format!("❌ Nie znaleziono spółki {}.", full_ticker),
+                )
+                .await?;
             }
         }
         Command::Usun(raw_ticker) => {
@@ -131,12 +140,18 @@ pub async fn answer_command(
                 remove_custom_stock_from_db(&conn, &full_ticker)
             };
             if removed {
-                bot.send_message(msg.chat.id, format!("🗑 Usunięto spółkę {} z bazy.", full_ticker))
-                    .await?;
+                bot.send_message(
+                    msg.chat.id,
+                    format!("🗑 Usunięto spółkę {} z bazy.", full_ticker),
+                )
+                .await?;
             } else {
                 bot.send_message(
                     msg.chat.id,
-                    format!("⚠️ Spółka {} nie znajdowała się w bazie custom_stocks.", full_ticker),
+                    format!(
+                        "⚠️ Spółka {} nie znajdowała się w bazie custom_stocks.",
+                        full_ticker
+                    ),
                 )
                 .await?;
             }
@@ -184,8 +199,11 @@ pub async fn answer_command(
             }
             let full_ticker = normalize_ticker(&raw_ticker);
 
-            bot.send_message(msg.chat.id, format!("📈 Generuję wykres dla {}...", full_ticker))
-                .await?;
+            bot.send_message(
+                msg.chat.id,
+                format!("📈 Generuję wykres dla {}...", full_ticker),
+            )
+            .await?;
 
             let prices = get_historical_prices(&http_client, &full_ticker).await;
             if !prices.is_empty() {
@@ -195,7 +213,10 @@ pub async fn answer_command(
 
                 match parse_chart_url(&chart_url) {
                     Some(url) => {
-                        let _ = bot.send_photo(msg.chat.id, InputFile::url(url)).caption(caption).await;
+                        let _ = bot
+                            .send_photo(msg.chat.id, InputFile::url(url))
+                            .caption(caption)
+                            .await;
                     }
                     None => {
                         bot.send_message(msg.chat.id, "⚠️ Nie udało się wygenerować wykresu.")
@@ -205,7 +226,10 @@ pub async fn answer_command(
             } else {
                 bot.send_message(
                     msg.chat.id,
-                    format!("❌ Nie udało się pobrać danych historycznych dla {}", full_ticker),
+                    format!(
+                        "❌ Nie udało się pobrać danych historycznych dla {}",
+                        full_ticker
+                    ),
                 )
                 .await?;
             }
@@ -239,7 +263,11 @@ pub async fn answer_command(
                 add_user_price_alert(&conn, &full_ticker, target_price, is_below);
             }
 
-            let direction = if is_below { "spadnie poniżej" } else { "wzrośnie powyżej" };
+            let direction = if is_below {
+                "spadnie poniżej"
+            } else {
+                "wzrośnie powyżej"
+            };
             bot.send_message(
                 msg.chat.id,
                 format!(

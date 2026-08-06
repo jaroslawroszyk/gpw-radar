@@ -146,7 +146,10 @@ pub fn toggle_mute_stock(conn: &Connection, ticker: &str) -> bool {
         let _ = conn.execute("DELETE FROM muted_stocks WHERE ticker = ?1", [ticker]);
         false
     } else {
-        let _ = conn.execute("INSERT OR REPLACE INTO muted_stocks (ticker) VALUES (?1)", [ticker]);
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO muted_stocks (ticker) VALUES (?1)",
+            [ticker],
+        );
         true
     }
 }
@@ -178,10 +181,11 @@ pub fn add_user_price_alert(conn: &Connection, ticker: &str, target_price: f64, 
 }
 
 pub fn get_user_price_alerts(conn: &Connection) -> Vec<(i64, CustomPriceAlert)> {
-    let mut stmt = match conn.prepare("SELECT id, ticker, target_price, is_below FROM user_price_alerts") {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
+    let mut stmt =
+        match conn.prepare("SELECT id, ticker, target_price, is_below FROM user_price_alerts") {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
 
     let alert_iter = stmt
         .query_map([], |row| {

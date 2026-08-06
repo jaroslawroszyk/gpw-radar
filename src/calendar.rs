@@ -47,7 +47,10 @@ pub async fn fetch_strefa_inwestorow_calendar(
                 continue;
             }
             if let Some(date) = cells.iter().find(|c| c.contains('-') && c.len() >= 8) {
-                let report_type = cells.last().cloned().unwrap_or_else(|| "Raport okresowy".to_string());
+                let report_type = cells
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| "Raport okresowy".to_string());
                 calendar_map.insert(candidate, format!("{} ({})", date, report_type));
             }
         }

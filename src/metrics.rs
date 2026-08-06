@@ -18,7 +18,8 @@ pub static ALERTS_SENT_COUNTER: LazyLock<IntCounter> = LazyLock::new(|| {
 });
 
 pub static HTTP_ERRORS_COUNTER: LazyLock<IntCounter> = LazyLock::new(|| {
-    prometheus::register_int_counter!("bot_http_errors_total", "Liczba błędów połączeń HTTP").unwrap()
+    prometheus::register_int_counter!("bot_http_errors_total", "Liczba błędów połączeń HTTP")
+        .unwrap()
 });
 
 pub static DB_STATUS_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {

@@ -3,7 +3,10 @@ use std::time::Duration;
 
 pub async fn get_price_from_bankier(client: &reqwest::Client, ticker: &str) -> Option<PriceData> {
     let clean_symbol = ticker.replace(".WA", "").to_lowercase();
-    let url = format!("https://www.bankier.pl/gielda/notowania/akcje/{}", clean_symbol);
+    let url = format!(
+        "https://www.bankier.pl/gielda/notowania/akcje/{}",
+        clean_symbol
+    );
 
     let res = client
         .get(&url)

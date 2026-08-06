@@ -10,7 +10,8 @@ pub fn parse_mar_insider_transaction(title: &str) -> Option<String> {
         return None;
     }
 
-    let action = if lower.contains("nabycie") || lower.contains("zakup") || lower.contains("kupno") {
+    let action = if lower.contains("nabycie") || lower.contains("zakup") || lower.contains("kupno")
+    {
         "🟢 <b>KUPNO (Nabycie)</b>"
     } else if lower.contains("zbycie") || lower.contains("sprzedaż") {
         "🔴 <b>SPRZEDAŻ (Zbycie)</b>"

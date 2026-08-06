@@ -25,7 +25,11 @@ pub async fn send_weekly_summary(
 
     for stock in stocks {
         if let Some(price) = get_stock_price(http_client, &stock.ticker).await {
-            let trend = if price.change_pct >= 0.0 { "📈" } else { "📉" };
+            let trend = if price.change_pct >= 0.0 {
+                "📈"
+            } else {
+                "📉"
+            };
             message.push_str(&format!(
                 "• <b>{} ({})</b>: {:.2} {} ({} {:+.2}%)\n",
                 stock.name, stock.ticker, price.price, price.currency, trend, price.change_pct
@@ -38,7 +42,10 @@ pub async fn send_weekly_summary(
                 worst_stock = Some((stock.name.clone(), price.change_pct));
             }
         } else {
-            message.push_str(&format!("• <b>{}</b>: ⚠️ Błąd pobierania kursu\n", stock.name));
+            message.push_str(&format!(
+                "• <b>{}</b>: ⚠️ Błąd pobierania kursu\n",
+                stock.name
+            ));
         }
     }
 
@@ -63,6 +70,9 @@ pub async fn send_weekly_summary(
         message.push_str(&format!("• <b>{}</b>: {}\n", stock.name, report_info));
     }
 
-    let _ = bot.send_message(chat_id, message).parse_mode(ParseMode::Html).await;
+    let _ = bot
+        .send_message(chat_id, message)
+        .parse_mode(ParseMode::Html)
+        .await;
     ALERTS_SENT_COUNTER.inc();
 }

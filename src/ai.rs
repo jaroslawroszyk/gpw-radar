@@ -5,7 +5,12 @@ use tracing::error;
 const GROQ_URL: &str = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL: &str = "llama-3.3-70b-versatile";
 
-async fn ask_groq(client: &reqwest::Client, prompt: String, max_tokens: u32, timeout_secs: u64) -> Option<String> {
+async fn ask_groq(
+    client: &reqwest::Client,
+    prompt: String,
+    max_tokens: u32,
+    timeout_secs: u64,
+) -> Option<String> {
     let api_key = std::env::var("GROQ_API_KEY").ok()?;
     if api_key.is_empty() {
         return None;
@@ -29,7 +34,10 @@ async fn ask_groq(client: &reqwest::Client, prompt: String, max_tokens: u32, tim
         .ok()?;
 
     let json_res: serde_json::Value = res.json().await.ok()?;
-    let content = json_res["choices"][0]["message"]["content"].as_str()?.trim().to_string();
+    let content = json_res["choices"][0]["message"]["content"]
+        .as_str()?
+        .trim()
+        .to_string();
     Some(content)
 }
 
@@ -44,7 +52,10 @@ pub async fn summarize_espi_with_ai(client: &reqwest::Client, title: &str) -> Op
     ask_groq(client, prompt, 140, 5).await
 }
 
-pub async fn evaluate_value_investing_with_ai(client: &reqwest::Client, title: &str) -> Option<String> {
+pub async fn evaluate_value_investing_with_ai(
+    client: &reqwest::Client,
+    title: &str,
+) -> Option<String> {
     let prompt = format!(
         "Jesteś inwestorem w wartość (Value Investor) kierującym się zasadami Benjamina Grahama i Warrena Buffetta. \
         Przeanalizuj komunikat ESPI z GPW pod kątem długoterminowej wartości, fosy rynkowej (Moat) i ryzyka. Podaj zwięzłą ocenę w MAX 2 zdaniach po polsku.\n\n\
@@ -66,7 +77,10 @@ pub async fn generate_full_on_demand_analysis(
     };
 
     let price_str = match price_info {
-        Some(p) => format!("{:.2} {} (zmiana: {:+.2}%)", p.price, p.currency, p.change_pct),
+        Some(p) => format!(
+            "{:.2} {} (zmiana: {:+.2}%)",
+            p.price, p.currency, p.change_pct
+        ),
         None => "Brak danych cenowych".to_string(),
     };
 
@@ -120,7 +134,10 @@ pub async fn generate_full_on_demand_analysis(
 
     if !status.is_success() {
         error!(status = %status, response = %text_response, "❌ Groq API zwróciło błąd HTTP");
-        return format!("⚠️ API Groq zwróciło błąd HTTP {}: {}", status, text_response);
+        return format!(
+            "⚠️ API Groq zwróciło błąd HTTP {}: {}",
+            status, text_response
+        );
     }
 
     if let Ok(json_res) = serde_json::from_str::<serde_json::Value>(&text_response) {

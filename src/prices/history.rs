@@ -40,7 +40,10 @@ pub async fn get_historical_prices(client: &reqwest::Client, ticker: &str) -> Ve
     );
     if let Ok(res) = client
         .get(&br_url)
-        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+        )
         .timeout(Duration::from_secs(6))
         .send()
         .await

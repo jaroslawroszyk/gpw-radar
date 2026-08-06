@@ -1,4 +1,6 @@
-use crate::analysis::{calculate_indicators, chart_caption, generate_quickchart_url, parse_chart_url};
+use crate::analysis::{
+    calculate_indicators, chart_caption, generate_quickchart_url, parse_chart_url,
+};
 use crate::db::toggle_mute_stock;
 use crate::prices::{get_historical_prices, get_stock_price};
 use crate::util::normalize_ticker;
@@ -29,10 +31,18 @@ pub async fn handle_callback_query(
 
                 let text = format!(
                     "📊 <b>WSKAŹNIKI DLA {}</b>\n\n💵 Kurs: {:.2} {}\n📈 Zmiana: {:+.2}%\n\n📉 <b>RSI (14):</b> {}\n🎯 <b>Sygnał:</b> {}\n📊 Źródło danych: {}",
-                    ticker, price.price, price.currency, price.change_pct, rsi_str, tech_info.trend_signal, price.source
+                    ticker,
+                    price.price,
+                    price.currency,
+                    price.change_pct,
+                    rsi_str,
+                    tech_info.trend_signal,
+                    price.source
                 );
                 if let Some(cid) = chat_id {
-                    bot.send_message(cid, text).parse_mode(ParseMode::Html).await?;
+                    bot.send_message(cid, text)
+                        .parse_mode(ParseMode::Html)
+                        .await?;
                 }
             }
         } else if let Some(raw_ticker) = data.strip_prefix("chart_") {
@@ -44,7 +54,10 @@ pub async fn handle_callback_query(
                 let caption = chart_caption(&ticker, &tech_info);
 
                 if let (Some(cid), Some(url)) = (chat_id, parse_chart_url(&chart_url)) {
-                    let _ = bot.send_photo(cid, InputFile::url(url)).caption(caption).await;
+                    let _ = bot
+                        .send_photo(cid, InputFile::url(url))
+                        .caption(caption)
+                        .await;
                 }
             }
         } else if let Some(raw_ticker) = data.strip_prefix("mute_") {

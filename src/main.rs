@@ -16,9 +16,9 @@ mod util;
 use config::AppConfig;
 use scanner::run_bot_loop;
 use std::sync::{Arc, Mutex};
+use telegram::{Command, callbacks::handle_callback_query};
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
-use telegram::{Command, callbacks::handle_callback_query};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
@@ -27,13 +27,16 @@ use tracing_subscriber::{EnvFilter, fmt};
 async fn main() {
     let _ = dotenvy::dotenv_override();
     fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_target(false)
         .init();
 
     let shared_config = Arc::new(AppConfig::load("config.toml"));
 
-    let bot_token = std::env::var("TELOXIDE_TOKEN").expect("Brak TELOXIDE_TOKEN w zmiennych środowiskowych!");
+    let bot_token =
+        std::env::var("TELOXIDE_TOKEN").expect("Brak TELOXIDE_TOKEN w zmiennych środowiskowych!");
     let bot = Bot::new(bot_token);
 
     let chat_id_raw: i64 = std::env::var("CHAT_ID")
@@ -49,7 +52,10 @@ async fn main() {
         .build()
         .expect("Nie udało się zbudować klienta HTTP");
 
-    info!("🤖 Bot uruchomiony, wczytano {} spółek", shared_config.stocks.len());
+    info!(
+        "🤖 Bot uruchomiony, wczytano {} spółek",
+        shared_config.stocks.len()
+    );
 
     let _ = bot.set_my_commands(Command::bot_commands()).await;
 

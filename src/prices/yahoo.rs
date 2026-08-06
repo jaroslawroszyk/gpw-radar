@@ -2,7 +2,10 @@ use crate::models::PriceData;
 use std::time::Duration;
 
 pub async fn get_price_from_yahoo(client: &reqwest::Client, ticker: &str) -> Option<PriceData> {
-    let url = format!("https://query1.finance.yahoo.com/v8/finance/chart/{}", ticker);
+    let url = format!(
+        "https://query1.finance.yahoo.com/v8/finance/chart/{}",
+        ticker
+    );
 
     let res = client
         .get(&url)

@@ -5,7 +5,9 @@ use crate::db::{
     record_spike_alert, remove_user_price_alert, should_alert_on_spike,
 };
 use crate::insider::parse_mar_insider_transaction;
-use crate::metrics::{ALERTS_SENT_COUNTER, CYCLE_DURATION_HISTOGRAM, HTTP_ERRORS_COUNTER, NEWS_CHECKED_COUNTER};
+use crate::metrics::{
+    ALERTS_SENT_COUNTER, CYCLE_DURATION_HISTOGRAM, HTTP_ERRORS_COUNTER, NEWS_CHECKED_COUNTER,
+};
 use crate::prices::get_stock_price;
 use crate::telegram::keyboard::build_espi_inline_keyboard;
 use crate::telegram::summary::send_weekly_summary;
@@ -83,14 +85,19 @@ pub async fn run_bot_loop(
         check_user_price_alerts(&bot, chat_id, &db, &http_client).await;
         check_price_spikes(&bot, chat_id, &db, &http_client, &tracked_stocks).await;
 
-        if let Err(()) = scan_espi_feed(&bot, chat_id, &config, &db, &http_client, &tracked_stocks).await {
+        if let Err(()) =
+            scan_espi_feed(&bot, chat_id, &config, &db, &http_client, &tracked_stocks).await
+        {
             HTTP_ERRORS_COUNTER.inc();
         }
         scan_macro_sources(&bot, chat_id, &config, &db, &http_client).await;
 
         timer.observe_duration();
         let cycle_duration = cycle_start.elapsed().as_millis();
-        info!(duration_ms = cycle_duration, "📊 Podsumowanie cyklu skanowania");
+        info!(
+            duration_ms = cycle_duration,
+            "📊 Podsumowanie cyklu skanowania"
+        );
 
         let sleep_duration = if trading_active {
             Duration::from_secs(3 * 60)
@@ -129,12 +136,19 @@ async fn check_user_price_alerts(
         };
 
         if triggered {
-            let dir_text = if alert.is_below { "spadł poniżej" } else { "wzrósł powyżej" };
+            let dir_text = if alert.is_below {
+                "spadł poniżej"
+            } else {
+                "wzrósł powyżej"
+            };
             let msg_text = format!(
                 "🎯 <b>[ALERT CENOWY OSIĄGNIĘTY]</b>\n🏢 <b>{}</b>\n💵 Aktualny kurs: <b>{:.2} {}</b> ({})\n🎯 Próg docelowy: {:.2} PLN",
                 alert.ticker, price.price, price.currency, dir_text, alert.target_price
             );
-            let _ = bot.send_message(chat_id, msg_text).parse_mode(ParseMode::Html).await;
+            let _ = bot
+                .send_message(chat_id, msg_text)
+                .parse_mode(ParseMode::Html)
+                .await;
 
             let conn = db.lock().unwrap();
             remove_user_price_alert(&conn, alert_id);
@@ -170,12 +184,25 @@ async fn check_price_spikes(
             record_spike_alert(&conn, &stock.ticker, price.change_pct);
         }
 
-        let trend_icon = if price.change_pct >= 0.0 { "💥 📈" } else { "💥 📉" };
+        let trend_icon = if price.change_pct >= 0.0 {
+            "💥 📈"
+        } else {
+            "💥 📉"
+        };
         let spike_msg = format!(
             "{} <b>[SKOK KURSU]</b>\n🏢 <b>{} ({})</b>\n💵 Kurs: <b>{:.2} {}</b> ({:+.2}%)\n📊 <i>Wykryto silny ruch cenowy! (Źródło: {})</i>",
-            trend_icon, stock.name, stock.ticker, price.price, price.currency, price.change_pct, price.source
+            trend_icon,
+            stock.name,
+            stock.ticker,
+            price.price,
+            price.currency,
+            price.change_pct,
+            price.source
         );
-        let _ = bot.send_message(chat_id, spike_msg).parse_mode(ParseMode::Html).await;
+        let _ = bot
+            .send_message(chat_id, spike_msg)
+            .parse_mode(ParseMode::Html)
+            .await;
         ALERTS_SENT_COUNTER.inc();
     }
 }
@@ -271,19 +298,32 @@ async fn send_espi_alert(
         .unwrap_or_default();
 
     let ai_summary_text = match summarize_espi_with_ai(http_client, raw_title).await {
-        Some(summary) => format!("\n🤖 <b>Skrót & Sentyment AI:</b>\n<i>{}</i>", sanitize_html(&summary)),
+        Some(summary) => format!(
+            "\n🤖 <b>Skrót & Sentyment AI:</b>\n<i>{}</i>",
+            sanitize_html(&summary)
+        ),
         None => String::new(),
     };
 
     let ai_buffett_text = match evaluate_value_investing_with_ai(http_client, raw_title).await {
-        Some(eval) => format!("\n🏛 <b>Ocena Buffetta & Grahama:</b> <i>{}</i>\n", sanitize_html(&eval)),
+        Some(eval) => format!(
+            "\n🏛 <b>Ocena Buffetta & Grahama:</b> <i>{}</i>\n",
+            sanitize_html(&eval)
+        ),
         None => String::new(),
     };
 
     let clean_title = sanitize_html(raw_title);
     let message = format!(
         "🚨 <b>[KOMUNIKAT - PORTFEL]</b>\n🏢 <b>{} ({})</b>\n{}\n{}\n{}\n{}\n📄 <b>Treść:</b> {}\n\n🔗 <a href=\"{}\">Otwórz raport ESPI</a>",
-        stock.name, stock.ticker, price_header, mar_text, ai_summary_text, ai_buffett_text, clean_title, link
+        stock.name,
+        stock.ticker,
+        price_header,
+        mar_text,
+        ai_summary_text,
+        ai_buffett_text,
+        clean_title,
+        link
     );
 
     let keyboard = build_espi_inline_keyboard(&stock.ticker);
@@ -318,7 +358,11 @@ async fn scan_macro_sources(
         for entry in feed.entries.iter().take(3) {
             NEWS_CHECKED_COUNTER.inc();
             let link = entry.links.first().map(|l| l.href.as_str()).unwrap_or("");
-            let raw_title = entry.title.as_ref().map(|t| t.content.as_str()).unwrap_or("");
+            let raw_title = entry
+                .title
+                .as_ref()
+                .map(|t| t.content.as_str())
+                .unwrap_or("");
 
             let is_seen = {
                 let conn = db.lock().unwrap();
@@ -351,9 +395,11 @@ async fn scan_macro_sources(
                 tag, source.name, clean_title, link
             );
 
-            let _ = bot.send_message(chat_id, message).parse_mode(ParseMode::Html).await;
+            let _ = bot
+                .send_message(chat_id, message)
+                .parse_mode(ParseMode::Html)
+                .await;
             ALERTS_SENT_COUNTER.inc();
         }
     }
 }
-
