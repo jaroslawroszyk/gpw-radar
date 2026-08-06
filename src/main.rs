@@ -1,18 +1,50 @@
+use axum::{Router, routing::get};
 use chrono::{Datelike, Timelike, Utc, Weekday};
 use chrono_tz::Europe::Warsaw;
+use lazy_static::lazy_static;
+use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounter, IntGauge, TextEncoder};
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use teloxide::prelude::*;
 use teloxide::types::{
     CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ParseMode,
 };
 use teloxide::utils::command::BotCommands;
-use tracing::{error, info};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
+
+lazy_static! {
+    pub static ref NEWS_CHECKED_COUNTER: IntCounter = prometheus::register_int_counter!(
+        "bot_news_checked_total",
+        "Całkowita liczba przeanalizowanych nagłówków ESPI/newsów"
+    )
+    .unwrap();
+    pub static ref ALERTS_SENT_COUNTER: IntCounter = prometheus::register_int_counter!(
+        "bot_alerts_sent_total",
+        "Całkowita liczba wysłanych alertów na Telegram"
+    )
+    .unwrap();
+    pub static ref HTTP_ERRORS_COUNTER: IntCounter =
+        prometheus::register_int_counter!("bot_http_errors_total", "Liczba błędów połączeń HTTP")
+            .unwrap();
+    pub static ref DB_STATUS_GAUGE: IntGauge =
+        prometheus::register_int_gauge!("bot_db_status", "Status połączenia z bazą SQLite")
+            .unwrap();
+    pub static ref CYCLE_DURATION_HISTOGRAM: HistogramVec = prometheus::register_histogram_vec!(
+        HistogramOpts::new(
+            "bot_cycle_duration_seconds",
+            "Czas trwania pełnego cyklu skanowania w sekundach"
+        ),
+        &["session_active"]
+    )
+    .unwrap();
+}
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct StockConfig {
@@ -526,6 +558,50 @@ fn parse_mar_insider_transaction(title: &str) -> Option<String> {
     ))
 }
 
+async fn metrics_handler() -> String {
+    let encoder = TextEncoder::new();
+    let metric_families = prometheus::gather();
+    let mut buffer = Vec::new();
+    if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
+        error!(error = %e, "Błąd podczas kodowania metryk Prometheusa");
+    }
+    String::from_utf8(buffer).unwrap_or_default()
+}
+
+async fn start_health_check_server(db: Arc<Mutex<Connection>>) {
+    let app = Router::new()
+        .route(
+            "/health",
+            get(move || {
+                let db_clone = Arc::clone(&db);
+                async move {
+                    let is_ok = db_clone
+                        .lock()
+                        .map_or(false, |conn| conn.execute_batch("SELECT 1;").is_ok());
+                    if is_ok {
+                        DB_STATUS_GAUGE.set(1);
+                        "OK"
+                    } else {
+                        DB_STATUS_GAUGE.set(0);
+                        "ERROR - DB UNREACHABLE"
+                    }
+                }
+            }),
+        )
+        .route("/metrics", get(metrics_handler));
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    info!(
+        url = "http://0.0.0.0:8080/health",
+        metrics = "http://0.0.0.0:8080/metrics",
+        "🌐 HTTP Health Check & Metrics serwer uruchomiony"
+    );
+
+    if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
+        let _ = axum::serve(listener, app).await;
+    }
+}
+
 fn is_trading_hours() -> bool {
     let now = Utc::now().with_timezone(&Warsaw);
     let weekday = now.weekday();
@@ -641,6 +717,7 @@ async fn send_weekly_summary(bot: &Bot, chat_id: ChatId, stocks: &[StockConfig],
     }
 
     let _ = bot.send_message(chat_id, message).parse_mode(ParseMode::Html).await;
+    ALERTS_SENT_COUNTER.inc();
 }
 
 #[derive(BotCommands, Clone)]
@@ -976,6 +1053,7 @@ fn init_db() -> Connection {
     )
     .unwrap();
 
+    DB_STATUS_GAUGE.set(1);
     conn
 }
 
@@ -1213,20 +1291,46 @@ fn matches_keywords<'a>(title: &'a str, keywords: &'a [String]) -> Option<&'a st
     None
 }
 
-async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc<Mutex<Connection>>) {
+async fn run_bot_loop(
+    bot: Bot,
+    chat_id: ChatId,
+    config: Arc<AppConfig>,
+    db: Arc<Mutex<Connection>>,
+    cancel_token: CancellationToken,
+) {
     let espi_rss_url = "https://www.bankier.pl/rss/wiadomosci.xml";
     let ai_client = reqwest::Client::new();
     let mut weekly_summary_sent_this_week = false;
     let mut daily_close_sent_today = false;
+    let mut last_off_session_notification = Instant::now();
 
     loop {
+        if cancel_token.is_cancelled() {
+            info!("🛑 Wykryto sygnał zamknięcia w pętli bota.");
+            break;
+        }
+
+        let cycle_start = Instant::now();
         let now = Utc::now().with_timezone(&Warsaw);
         let trading_active = is_trading_hours();
+        let timer = CYCLE_DURATION_HISTOGRAM
+            .with_label_values(&[&trading_active.to_string()])
+            .start_timer();
 
         let tracked_stocks = {
             let conn = db.lock().unwrap();
             get_all_tracked_stocks(&config, &conn)
         };
+
+        if !trading_active {
+            if last_off_session_notification.elapsed() >= Duration::from_secs(8 * 3600) {
+                let off_msg = "🌙 Rynek GPW jest obecnie zamknięty. Bot pracuje w trybie oszczędnym (co 30 min).";
+                let _ = bot.send_message(chat_id, off_msg).await;
+                last_off_session_notification = Instant::now();
+            }
+        } else {
+            last_off_session_notification = Instant::now() - Duration::from_secs(8 * 3600);
+        }
 
         if trading_active && now.hour() == 17 && now.minute() >= 5 && !daily_close_sent_today {
             send_weekly_summary(&bot, chat_id, &tracked_stocks, true).await;
@@ -1306,6 +1410,7 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
                             .send_message(chat_id, spike_msg)
                             .parse_mode(ParseMode::Html)
                             .await;
+                        ALERTS_SENT_COUNTER.inc();
                     }
                 }
             }
@@ -1315,6 +1420,7 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
             if let Ok(bytes) = response.bytes().await {
                 if let Ok(feed) = feed_rs::parser::parse(&bytes[..]) {
                     for entry in feed.entries.iter().take(20) {
+                        NEWS_CHECKED_COUNTER.inc();
                         let link = entry.links.first().map(|l| l.href.as_str()).unwrap_or("");
                         let raw_title = entry
                             .title
@@ -1397,6 +1503,7 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
                                         .parse_mode(ParseMode::Html)
                                         .reply_markup(keyboard)
                                         .await;
+                                    ALERTS_SENT_COUNTER.inc();
                                     break;
                                 }
                             }
@@ -1405,6 +1512,7 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
                 }
             }
         } else {
+            HTTP_ERRORS_COUNTER.inc();
             error!("Błąd pobierania feedu RSS");
         }
 
@@ -1413,6 +1521,7 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
                 if let Ok(bytes) = response.bytes().await {
                     if let Ok(feed) = feed_rs::parser::parse(&bytes[..]) {
                         for entry in feed.entries.iter().take(3) {
+                            NEWS_CHECKED_COUNTER.inc();
                             let link = entry.links.first().map(|l| l.href.as_str()).unwrap_or("");
                             let raw_title = entry
                                 .title
@@ -1455,20 +1564,33 @@ async fn run_bot_loop(bot: Bot, chat_id: ChatId, config: Arc<AppConfig>, db: Arc
                                         .send_message(chat_id, message)
                                         .parse_mode(ParseMode::Html)
                                         .await;
+                                    ALERTS_SENT_COUNTER.inc();
                                 }
                             }
                         }
                     }
                 }
+            } else {
+                HTTP_ERRORS_COUNTER.inc();
             }
         }
+
+        timer.observe_duration();
+        let cycle_duration = cycle_start.elapsed().as_millis();
+        info!(duration_ms = cycle_duration, "📊 Podsumowanie cyklu skanowania");
 
         let sleep_duration = if trading_active {
             Duration::from_secs(3 * 60)
         } else {
             Duration::from_secs(30 * 60)
         };
-        tokio::time::sleep(sleep_duration).await;
+        tokio::select! {
+            _ = tokio::time::sleep(sleep_duration) => {},
+            _ = cancel_token.cancelled() => {
+                info!("🛑 Wykryto anulowanie w trakcie uśpienia. Łagodne wychodzenie...");
+                break;
+            }
+        }
     }
 }
 
@@ -1496,13 +1618,21 @@ async fn main() {
 
     let db = Arc::new(Mutex::new(init_db()));
 
-    info!("Bot uruchomiony, wczytano {} spółek", shared_config.stocks.len());
+    info!("🤖 Bot uruchomiony, wczytano {} spółek", shared_config.stocks.len());
+
+    let _ = bot.set_my_commands(Command::bot_commands()).await;
+
+    let cancel_token = CancellationToken::new();
+
+    let health_db = Arc::clone(&db);
+    tokio::spawn(start_health_check_server(health_db));
 
     let bg_bot = bot.clone();
     let bg_config = Arc::clone(&shared_config);
     let bg_db = Arc::clone(&db);
-    tokio::spawn(async move {
-        run_bot_loop(bg_bot, chat_id, bg_config, bg_db).await;
+    let bg_token = cancel_token.clone();
+    let loop_handle = tokio::spawn(async move {
+        run_bot_loop(bg_bot, chat_id, bg_config, bg_db, bg_token).await;
     });
 
     let callback_db = Arc::clone(&db);
@@ -1519,10 +1649,25 @@ async fn main() {
             }),
         );
 
-    Dispatcher::builder(bot, handler)
+    let mut dispatcher = Dispatcher::builder(bot.clone(), handler)
         .dependencies(dptree::deps![Arc::clone(&shared_config), Arc::clone(&db)])
         .enable_ctrlc_handler()
-        .build()
-        .dispatch()
-        .await;
+        .build();
+
+    let shutdown_bot = bot.clone();
+
+    tokio::select! {
+        _ = dispatcher.dispatch() => {},
+        _ = tokio::signal::ctrl_c() => {
+            warn!("🛑 Otrzymano sygnał SIGINT/SIGTERM. Rozpoczynanie Graceful Shutdown...");
+            cancel_token.cancel();
+
+            let _ = shutdown_bot
+                .send_message(chat_id, "🛠 Bot przechodzi w stan konserwacji / restartu. Zamykanie połączeń...")
+                .await;
+
+            let _ = loop_handle.await;
+            info!("👋 Wszystkie zadania zostały bezpiecznie zakończone. Aplikacja zatrzymana.");
+        }
+    }
 }
