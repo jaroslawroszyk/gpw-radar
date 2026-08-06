@@ -1,6 +1,7 @@
 use std::time::Duration;
 use tracing::{error, info};
 
+/// Fetch historical prices for a given stock ticker from Stooq and BiznesRadargit
 pub async fn get_historical_prices(client: &reqwest::Client, ticker: &str) -> Vec<f64> {
     let clean_symbol = ticker.replace(".WA", "").to_lowercase();
 
