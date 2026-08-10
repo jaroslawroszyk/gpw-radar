@@ -1,10 +1,8 @@
-# Ogólne słowa kluczowe dla wszystkich spółek w portfelu
 global_high_impact = [
     "wyniki", "przychody", "zysk", "strata", "umowa", "kontrakt",
     "dywidend", "wezwanie", "emisja", "rezygnacja", "zarząd"
 ]
 
-# Globalne słowa kluczowe dla szerokiego rynku / makro
 macro_keywords = [
     "giełda", "stopy", "inflacja", "nbp", "fed", "orlen", "kghm",
     "pko", "pekao", "pzu", "dolar", "ropa", "gaz", "msci"
@@ -16,6 +14,11 @@ name = "Medicalgorithms"
 keywords = ["fda", "patent", "certyfikat", "algorytm"]
 
 [[stocks]]
+ticker = "ABE.WA"
+name = "AB PL"
+keywords = []
+
+[[stocks]]
 ticker = "MRB.WA"
 name = "Mirbud"
 keywords = ["budowa", "przetarg", "kontrakt", "umowa"]
@@ -24,6 +27,26 @@ keywords = ["budowa", "przetarg", "kontrakt", "umowa"]
 ticker = "NWG.WA"
 name = "NEWAG"
 keywords = ["kontrakt", "umowa", "przetarg", "produkcja", "lokomotywa", "tramwaj"]
+
+[[stocks]]
+ticker = "PZU.WA"
+name = "PZU"
+keywords = ["ubezpieczenie", "ryzyko", "przychod", "zysk"]
+
+[[stocks]]
+ticker = "TOA.WA"
+name = "TOYA"
+keywords = []
+
+[[stocks]]
+ticker = "MBK.WA"
+name = "mBank"
+keywords = []
+
+[[stocks]]
+ticker = "ING.WA"
+name = "ING Bank Śląski"
+keywords = []
 
 [[market_sources]]
 name = "ISBnews"
@@ -36,6 +59,26 @@ url = "https://www.parkiet.com/rss/espi"
 is_global = false
 
 [[market_sources]]
+name = "Bankier Wiadomości"
+url = "https://www.bankier.pl/rss/wiadomosci.xml"
+is_global = false
+
+[[market_sources]]
+name = "WNP Gospodarka"
+url = "https://www.wnp.pl/rss/gospodarka.xml"
+is_global = false
+
+[[market_sources]]
 name = "PB.pl"
 url = "https://www.pb.pl/rss/wiadomosci.xml"
 is_global = false
+
+[[market_sources]]
+name = "CNBC World"
+url = "https://www.cnbc.com/id/100727362/device/rss/rss.html"
+is_global = true
+
+[[market_sources]]
+name = "MarketWatch"
+url = "http://feeds.marketwatch.com/marketwatch/topstories/"
+is_global = true
